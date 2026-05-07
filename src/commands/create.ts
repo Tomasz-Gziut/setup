@@ -291,16 +291,15 @@ export async function createCommand(fileName: string): Promise<void> {
       selectedCursorIndex = clamp(selectedCursorIndex, 0, Math.max(0, selectedApps.length - 1));
     }
   };
-  const prepareEnterAction = () => {
+  const executeEnterAction = () => {
     if (activePanel === 'available') {
       if (filteredApps.length === 0) return;
       const app = filteredApps[cursorIndex];
-      const isSelected = selectedApps.some(s => s.id === app.id);
-      pendingAction = { message: `${isSelected ? 'Remove from selected' : 'Select'} ${app.name}?`, run: () => toggleAvailableApp(app) };
+      toggleAvailableApp(app);
     } else {
       if (selectedApps.length === 0) return;
-      const app = selectedApps[selectedCursorIndex];
-      pendingAction = { message: `Remove ${app.name} from selected?`, run: () => { selectedApps.splice(selectedCursorIndex, 1); selectedCursorIndex = clamp(selectedCursorIndex, 0, Math.max(0, selectedApps.length - 1)); } };
+      selectedApps.splice(selectedCursorIndex, 1);
+      selectedCursorIndex = clamp(selectedCursorIndex, 0, Math.max(0, selectedApps.length - 1));
     }
   };
 
@@ -434,7 +433,7 @@ export async function createCommand(fileName: string): Promise<void> {
       if (key.name === 'down') { moveActiveCursor(1); render(); return; }
       if (key.name === 'pageup') { moveActiveCursor(-PAGE_SIZE); render(); return; }
       if (key.name === 'pagedown') { moveActiveCursor(PAGE_SIZE); render(); return; }
-      if (key.name === 'return') { prepareEnterAction(); render(); return; }
+      if (key.name === 'return') { executeEnterAction(); render(); return; }
       if (key.name === 'escape') { render(); return; }
       if (key.name === 'backspace') {
         filterText = filterText.slice(0, -1);
