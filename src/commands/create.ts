@@ -14,7 +14,7 @@ type InstalledMatch = {
   source: string;
 };
 
-type ActivePanel = 'available' | 'selected' | 'installed';
+type ActivePanel = 'available' | 'selected';
 
 type PendingAction = {
   message: string;
@@ -37,8 +37,8 @@ export async function createCommand(fileName: string): Promise<void> {
   let activePanel: ActivePanel = 'available';
   let cursorIndex = 0;
   let selectedCursorIndex = 0;
-  let installedCursorIndex = 0;
   let filterText = '';
+  let showInstalledOnly = false;
   let pendingAction: PendingAction | undefined;
 
   const configPath = fileName.endsWith('.json') ? fileName : `${fileName}.json`;
@@ -97,10 +97,8 @@ export async function createCommand(fileName: string): Promise<void> {
   const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
   const getAvailablePage = () => Math.floor(cursorIndex / PAGE_SIZE);
   const getSelectedPage = () => Math.floor(selectedCursorIndex / PAGE_SIZE);
-  const getInstalledPage = () => Math.floor(installedCursorIndex / PAGE_SIZE);
   const getCurrentPageApps = () => filteredApps.slice(getAvailablePage() * PAGE_SIZE, getAvailablePage() * PAGE_SIZE + PAGE_SIZE);
   const getCurrentSelectedApps = () => selectedApps.slice(getSelectedPage() * PAGE_SIZE, getSelectedPage() * PAGE_SIZE + PAGE_SIZE);
-  const getCurrentInstalledApps = () => installedApps.slice(getInstalledPage() * PAGE_SIZE, getInstalledPage() * PAGE_SIZE + PAGE_SIZE);
 
   const mergeApps = (...appLists: InstalledApp[][]): InstalledApp[] => {
     const appsById = new Map<string, InstalledApp>();
@@ -169,7 +167,7 @@ export async function createCommand(fileName: string): Promise<void> {
       const source = installedMatch?.source ?? app.source;
       const isInstalled = installedVersion !== undefined;
       const isCursor = activePanel === 'available' && globalIdx === cursorIndex;
-      const statusIcon = isInstalled ? chalk.green('[i]') : isSelected ? chalk.blue('[x]') : chalk.gray('[ ]');
+      const statusIcon = isSelected ? (isInstalled ? chalk.green('[x]') : chalk.blue('[x]')) : (isInstalled ? chalk.green('[i]') : chalk.gray('[ ]'));
       const name = safeText(app.name, 16);
       const id = safeText(app.id, 18);
       const sourceText = safeText(source || 'N/A', 8);
@@ -205,29 +203,13 @@ export async function createCommand(fileName: string): Promise<void> {
     return table;
   };
 
-  const buildInstalledTable = (): Table.Table => {
-    const table = new Table({ head: [panelTitle('installed', `Installed (${installedApps.length})`)], colWidths: [24], style: { head: activePanel === 'installed' ? ['cyan'] : ['magenta'], border: ['gray'] } });
-    if (installedApps.length === 0) {
-      table.push([chalk.gray('No installed apps')]);
-      return table;
-    }
-    const pageApps = getCurrentInstalledApps();
-    const pageStart = getInstalledPage() * PAGE_SIZE;
-    pageApps.forEach((app, index) => {
-      const globalIndex = pageStart + index;
-      const name = safeText(app.name, 22);
-      if (activePanel === 'installed' && globalIndex === installedCursorIndex) table.push([chalk.bgCyan.black(name.padEnd(22))]);
-      else table.push([name]);
-    });
-    return table;
-  };
-
   const render = () => {
     clearScreen();
     console.log(chalk.cyan.bold(`Creating config: ${configPath}`));
     console.log();
     const filterLabel = filterText ? `Filter: ${filterText}_ (${filteredApps.length} results)` : 'Filter: _';
-    console.log(chalk.yellow.bold(filterLabel));
+    const installedFilterLabel = showInstalledOnly ? chalk.magenta(' [Installed only]') : '';
+    console.log(chalk.yellow.bold(filterLabel) + installedFilterLabel);
     if (pendingAction) {
       console.log(chalk.yellow(`Confirm: ${pendingAction.message}`));
       console.log(chalk.gray('Enter = confirm, Esc = cancel'));
@@ -236,21 +218,26 @@ export async function createCommand(fileName: string): Promise<void> {
     const totalPages = Math.max(1, Math.ceil(filteredApps.length / PAGE_SIZE));
     console.log(chalk.bold(`Applications (Page ${getAvailablePage() + 1}/${totalPages}):`));
     if (filterSearching) console.log(chalk.gray('  Searching winget source...'));
-    printSideBySide([buildAvailableTable().toString(), buildSelectedTable().toString(), buildInstalledTable().toString()]);
+    printSideBySide([buildAvailableTable().toString(), buildSelectedTable().toString()]);
     console.log();
-    console.log(chalk.gray('-'.repeat(60)));
+    console.log(chalk.gray('-'.repeat(70)));
     console.log(`${chalk.green('[i]')} installed  ${chalk.blue('[x]')} selected  ${chalk.gray('[ ]')} not selected`);
     console.log();
     console.log(chalk.bold('Controls:'));
-    console.log(`  ${chalk.yellow('Type')}    Filter         ${chalk.yellow('Backspace')} Delete char`);
+    console.log(`  ${chalk.yellow('Type')}    Filter         ${chalk.yellow('Backspace')} Delete char   ${chalk.yellow('Tab')} Toggle installed filter`);
     console.log(`  ${chalk.yellow('Left/Right')} Change table   ${chalk.yellow('Up/Down')} Navigate`);
-    console.log(`  ${chalk.yellow('Enter')}   Action         ${chalk.yellow('Ctrl+S')} Save   ${chalk.yellow('Ctrl+Q')} Quit`);
+    console.log(`  ${chalk.yellow('Enter')}   Select/Remove  ${chalk.yellow('Ctrl+S')} Save   ${chalk.yellow('Ctrl+Q')} Quit`);
+    console.log(`  ${chalk.yellow('Ctrl+I')} Install selected   ${chalk.yellow('Ctrl+U')} Uninstall selected`);
   };
 
   const getLocalMatches = (q: string): InstalledApp[] => allApps.filter(app => app.name.toLowerCase().includes(q) || app.id.toLowerCase().includes(q));
   const applyLocalFilter = () => {
     const trimmedFilter = filterText.trim();
-    filteredApps = trimmedFilter ? getLocalMatches(trimmedFilter.toLowerCase()) : [...allApps];
+    let apps = trimmedFilter ? getLocalMatches(trimmedFilter.toLowerCase()) : [...allApps];
+    if (showInstalledOnly) {
+      apps = apps.filter(app => findInstalledMatch(app) !== undefined);
+    }
+    filteredApps = apps;
     cursorIndex = clamp(cursorIndex, 0, Math.max(0, filteredApps.length - 1));
   };
   const applyWingetFilter = async (trimmedFilter: string) => {
@@ -284,15 +271,14 @@ export async function createCommand(fileName: string): Promise<void> {
     }, 450);
   };
 
-  const getActiveListLength = (): number => activePanel === 'available' ? filteredApps.length : activePanel === 'selected' ? selectedApps.length : installedApps.length;
+  const getActiveListLength = (): number => activePanel === 'available' ? filteredApps.length : selectedApps.length;
   const moveActiveCursor = (delta: number) => {
     const maxIndex = Math.max(0, getActiveListLength() - 1);
     if (activePanel === 'available') cursorIndex = clamp(cursorIndex + delta, 0, maxIndex);
-    else if (activePanel === 'selected') selectedCursorIndex = clamp(selectedCursorIndex + delta, 0, maxIndex);
-    else installedCursorIndex = clamp(installedCursorIndex + delta, 0, maxIndex);
+    else selectedCursorIndex = clamp(selectedCursorIndex + delta, 0, maxIndex);
   };
   const changePanel = (delta: number) => {
-    const panels: ActivePanel[] = ['available', 'selected', 'installed'];
+    const panels: ActivePanel[] = ['available', 'selected'];
     activePanel = panels[clamp(panels.indexOf(activePanel) + delta, 0, panels.length - 1)];
   };
   const toggleAvailableApp = (app: InstalledApp) => {
@@ -311,25 +297,10 @@ export async function createCommand(fileName: string): Promise<void> {
       const app = filteredApps[cursorIndex];
       const isSelected = selectedApps.some(s => s.id === app.id);
       pendingAction = { message: `${isSelected ? 'Remove from selected' : 'Select'} ${app.name}?`, run: () => toggleAvailableApp(app) };
-    } else if (activePanel === 'selected') {
+    } else {
       if (selectedApps.length === 0) return;
       const app = selectedApps[selectedCursorIndex];
       pendingAction = { message: `Remove ${app.name} from selected?`, run: () => { selectedApps.splice(selectedCursorIndex, 1); selectedCursorIndex = clamp(selectedCursorIndex, 0, Math.max(0, selectedApps.length - 1)); } };
-    } else {
-      if (installedApps.length === 0) return;
-      const app = installedApps[installedCursorIndex];
-      pendingAction = { message: `Uninstall ${app.name}?`, run: async () => {
-        const result = await winget.uninstallApp(app.id);
-        if (result.success) {
-          installedApps = installedApps.filter(installed => installed.id !== app.id);
-          installedCursorIndex = clamp(installedCursorIndex, 0, Math.max(0, installedApps.length - 1));
-          rebuildInstalledIndexes();
-        } else {
-          clearScreen();
-          console.log(chalk.red(`Uninstall failed: ${result.message}`));
-          await new Promise(resolve => setTimeout(resolve, 1500));
-        }
-      } };
     }
   };
 
@@ -389,6 +360,66 @@ export async function createCommand(fileName: string): Promise<void> {
         cleanup();
         console.log(chalk.yellow('Exited without saving.'));
         resolve();
+        return;
+      }
+      if (key.ctrl && key.name === 'i') {
+        if (selectedApps.length === 0) { render(); return; }
+        const appsToInstall = selectedApps.map(a => a.name).join(', ');
+        pendingAction = {
+          message: `Install/reinstall ${selectedApps.length} app(s)? (${appsToInstall})`,
+          run: async () => {
+            for (const app of selectedApps) {
+              clearScreen();
+              console.log(chalk.cyan(`Installing ${app.name}...`));
+              const result = await winget.installApp(app.id);
+              if (!result.success) {
+                console.log(chalk.red(`Failed to install ${app.name}: ${result.message}`));
+                await new Promise(resolve => setTimeout(resolve, 1500));
+              }
+            }
+            installedApps = winget.getInstalledApps().filter(app => !winget.isSystemApp(app));
+            rebuildInstalledIndexes();
+            applyLocalFilter();
+          }
+        };
+        render();
+        return;
+      }
+      if (key.ctrl && key.name === 'u') {
+        if (selectedApps.length === 0) { render(); return; }
+        const installedSelected = selectedApps.filter(app => findInstalledMatch({ id: app.id, name: app.name, version: app.version, source: '' }) !== undefined);
+        if (installedSelected.length === 0) {
+          clearScreen();
+          console.log(chalk.yellow('No selected apps are installed.'));
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          render();
+          return;
+        }
+        const appsToUninstall = installedSelected.map(a => a.name).join(', ');
+        pendingAction = {
+          message: `Uninstall ${installedSelected.length} app(s)? (${appsToUninstall})`,
+          run: async () => {
+            for (const app of installedSelected) {
+              clearScreen();
+              console.log(chalk.cyan(`Uninstalling ${app.name}...`));
+              const result = await winget.uninstallApp(app.id);
+              if (!result.success) {
+                console.log(chalk.red(`Failed to uninstall ${app.name}: ${result.message}`));
+                await new Promise(resolve => setTimeout(resolve, 1500));
+              }
+            }
+            installedApps = winget.getInstalledApps().filter(app => !winget.isSystemApp(app));
+            rebuildInstalledIndexes();
+            applyLocalFilter();
+          }
+        };
+        render();
+        return;
+      }
+      if (key.name === 'tab') {
+        showInstalledOnly = !showInstalledOnly;
+        applyLocalFilter();
+        render();
         return;
       }
       if (key.name === 'left') { changePanel(-1); render(); return; }
