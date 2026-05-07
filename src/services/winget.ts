@@ -141,6 +141,40 @@ export class WingetService {
     });
   }
 
+  async uninstallApp(id: string): Promise<{ success: boolean; message: string }> {
+    return new Promise((resolve) => {
+      const process = spawn('winget', ['uninstall', '--id', id, '--disable-interactivity'], {
+        shell: true,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+      let output = '';
+      let errorOutput = '';
+
+      process.stdout?.on('data', (data) => {
+        output += data.toString();
+        const text = data.toString().trim();
+        if (text) console.log(`  ${text}`);
+      });
+
+      process.stderr?.on('data', (data) => {
+        errorOutput += data.toString();
+      });
+
+      process.on('close', (code) => {
+        if (code === 0) {
+          resolve({ success: true, message: 'Uninstalled successfully' });
+        } else {
+          resolve({ success: false, message: errorOutput || output || 'Uninstall failed' });
+        }
+      });
+
+      process.on('error', (error) => {
+        resolve({ success: false, message: error.message });
+      });
+    });
+  }
+
   async searchApp(query: string): Promise<InstalledApp[]> {
     try {
       const cmd = query
