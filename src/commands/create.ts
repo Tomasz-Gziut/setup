@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as readline from 'readline';
 import { WingetService } from '../services/winget';
 import { AppConfig, Config, InstalledApp } from '../types/config';
+import { PRESET_DIR } from '../constants';
 
 const PAGE_SIZE = 10;
 
@@ -19,9 +20,14 @@ export async function createCommand(fileName: string): Promise<void> {
   let filterText = '';
 
   const configPath = fileName.endsWith('.json') ? fileName : `${fileName}.json`;
-  const fullPath = path.resolve(process.cwd(), configPath);
+  const fullPath = path.join(PRESET_DIR, configPath);
 
-  console.log(chalk.cyan(`\n🛠️  Creating config: ${chalk.bold(configPath)}`));
+  // Ensure PRESET_DIR exists
+  if (!fs.existsSync(PRESET_DIR)) {
+    fs.mkdirSync(PRESET_DIR, { recursive: true });
+  }
+
+  console.log(chalk.cyan(`\n🛠️  Creating config: ${chalk.bold(fullPath)}`));
 
   process.stdout.write(chalk.gray('Loading installed applications... '));
   const installedApps = winget.getInstalledApps();

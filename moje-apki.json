@@ -1,9 +1,9 @@
 {
   "apps": [
     {
-      "id": "OpenAI.Codex",
-      "name": "Codex CLI",
-      "version": "0.128.0",
+      "id": "Notion.Notion",
+      "name": "Notion",
+      "version": "7.14.0",
       "availableInWinget": true
     }
   ]

@@ -2,9 +2,14 @@ import fs from 'fs';
 import path from 'path';
 import chalk from 'chalk';
 import Table from 'cli-table3';
+import * as readline from 'readline';
 import { execSync } from 'child_process';
 import { Config } from '../types/config';
 import { WingetService } from '../services/winget';
+import { PRESET_DIR } from '../constants';
+
+const PAGE_SIZE = 10;
+
 
 function createExeAliases(): string[] {
   const userHome = process.env.USERPROFILE || '';
@@ -138,8 +143,156 @@ function ensureWingetPathsConfigured(): { linksAdded: boolean; packagesAdded: st
   }
 }
 
-export async function installCommand(configPath: string): Promise<void> {
+export async function installCommand(configPath?: string): Promise<void> {
   const winget = new WingetService();
+
+  if (!configPath) {
+    // Interactive mode
+    if (!fs.existsSync(PRESET_DIR)) {
+      console.error(chalk.red(`Error: Preset directory not found: ${PRESET_DIR}`));
+      process.exit(1);
+    }
+
+    const presets = fs.readdirSync(PRESET_DIR).filter(f => f.endsWith('.json'));
+    if (presets.length === 0) {
+      console.error(chalk.red(`Error: No presets found in ${PRESET_DIR}`));
+      process.exit(1);
+    }
+
+    const installedApps = winget.getInstalledApps();
+    const installedIds = new Set(installedApps.map(app => app.id));
+
+    let cursorIndex = 0;
+
+    const clearScreen = () => {
+      process.stdout.write('\x1B[2J\x1B[H');
+    };
+
+    const render = () => {
+      clearScreen();
+      console.log(chalk.cyan.bold('📂 Select a preset to install:'));
+      console.log();
+
+      const table = new Table({
+        head: [' ', 'Preset Name', 'Apps', 'Status'],
+        colWidths: [5, 40, 10, 20],
+        style: { head: ['cyan'], border: ['gray'] }
+      });
+
+      presets.forEach((presetFile, i) => {
+        const isCursor = i === cursorIndex;
+        const fullPresetPath = path.join(PRESET_DIR, presetFile);
+        
+        let config: Config;
+        try {
+          config = JSON.parse(fs.readFileSync(fullPresetPath, 'utf-8'));
+        } catch {
+          return;
+        }
+
+        const allInstalled = config.apps.every(app => !app.id || installedIds.has(app.id) || app.availableInWinget === false);
+        const statusIcon = allInstalled ? chalk.green('✓') : chalk.gray('○');
+        const statusText = allInstalled ? chalk.green('Installed') : chalk.yellow('Pending');
+        const appCount = config.apps.length.toString();
+        const presetName = presetFile.replace('.json', '');
+
+        if (isCursor) {
+          table.push([
+            chalk.bgCyan.black(` ${statusIcon} `),
+            chalk.bgCyan.black(presetName.padEnd(38)),
+            chalk.bgCyan.black(appCount.padEnd(8)),
+            chalk.bgCyan.black(statusText.padEnd(18))
+          ]);
+        } else {
+          table.push([` ${statusIcon} `, presetName, appCount, statusText]);
+        }
+      });
+
+      console.log(table.toString());
+      console.log();
+      console.log(chalk.gray('─'.repeat(60)));
+      console.log(`${chalk.green('✓')} fully installed  ${chalk.gray('○')} pending apps`);
+      console.log();
+      console.log(chalk.bold('Controls:'));
+      console.log(`  ${chalk.yellow('↑/↓')}     Navigate       ${chalk.yellow('Enter')}   Select preset`);
+      console.log(`  ${chalk.yellow('q')}       Quit`);
+    };
+
+    // Setup raw mode for keyboard input
+    readline.emitKeypressEvents(process.stdin);
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(true);
+    }
+
+    render();
+
+    return new Promise((resolve) => {
+      const cleanup = () => {
+        if (process.stdin.isTTY) {
+          process.stdin.setRawMode(false);
+        }
+        process.stdin.removeAllListeners('keypress');
+        clearScreen();
+      };
+
+      process.stdin.on('keypress', async (_str, key) => {
+        if (!key) return;
+
+        if (key.ctrl && key.name === 'c') {
+          cleanup();
+          process.exit(0);
+        }
+
+        switch (key.name) {
+          case 'up':
+          case 'k':
+            if (cursorIndex > 0) {
+              cursorIndex--;
+              render();
+            }
+            break;
+
+          case 'down':
+          case 'j':
+            if (cursorIndex < presets.length - 1) {
+              cursorIndex++;
+              render();
+            }
+            break;
+
+          case 'pageup':
+            cursorIndex = Math.max(0, cursorIndex - PAGE_SIZE);
+            render();
+            break;
+
+          case 'pagedown':
+            cursorIndex = Math.min(presets.length - 1, cursorIndex + PAGE_SIZE);
+            render();
+            break;
+
+          case 'return':
+            const selectedPreset = presets[cursorIndex];
+            cleanup();
+            await performInstallation(path.join(PRESET_DIR, selectedPreset));
+            resolve();
+            break;
+
+          case 'q':
+          case 'escape':
+            cleanup();
+            resolve();
+            break;
+        }
+      });
+    });
+  }
+
+  await performInstallation(configPath);
+}
+
+async function performInstallation(configPath: string): Promise<void> {
+  const winget = new WingetService();
+
 
   // Resolve absolute path
   const absolutePath = path.resolve(configPath);

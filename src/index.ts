@@ -32,10 +32,11 @@ program
 program
   .command('install')
   .description('Install applications from config file')
-  .argument('<path>', 'Path to config.json file')
+  .argument('[path]', 'Path to config.json file (optional if using presets)')
   .action(async (configPath: string) => {
     await installCommand(configPath);
   });
+
 
 program
   .command('export')
