@@ -152,7 +152,7 @@ export async function createCommand(fileName: string): Promise<void> {
   const buildAvailableTable = (): Table.Table => {
     const table = new Table({
       head: [' ', panelTitle('available', 'Available'), 'ID', 'Version', 'Source'],
-      colWidths: [5, 22, 24, 10, 11],
+      colWidths: [5, 18, 20, 9, 10],
       style: { head: activePanel === 'available' ? ['cyan'] : ['gray'], border: ['gray'] }
     });
     if (filteredApps.length === 0) {
@@ -170,15 +170,15 @@ export async function createCommand(fileName: string): Promise<void> {
       const isInstalled = installedVersion !== undefined;
       const isCursor = activePanel === 'available' && globalIdx === cursorIndex;
       const statusIcon = isInstalled ? chalk.green('[i]') : isSelected ? chalk.blue('[x]') : chalk.gray('[ ]');
-      const name = safeText(app.name, 20);
-      const id = safeText(app.id, 22);
-      const sourceText = safeText(source || 'N/A', 9);
-      let versionText = safeText(app.version, 8);
+      const name = safeText(app.name, 16);
+      const id = safeText(app.id, 18);
+      const sourceText = safeText(source || 'N/A', 8);
+      let versionText = safeText(app.version, 7);
       if (isInstalled && installedVersion !== app.version) versionText = chalk.yellow(versionText);
       else if (!isCursor) versionText = chalk.gray(versionText);
       if (isCursor) {
-        const row = [chalk.bgCyan.black(statusIcon), chalk.bgCyan.black(name.padEnd(20)), chalk.bgCyan.black(id.padEnd(22)), chalk.bgCyan.black(safeText(app.version, 8).padEnd(8)), chalk.bgCyan.black(sourceText.padEnd(9))];
-        if (isInstalled && installedVersion !== app.version) row[3] = chalk.bgCyan.yellow(safeText(app.version, 8).padEnd(8));
+        const row = [chalk.bgCyan.black(statusIcon), chalk.bgCyan.black(name.padEnd(16)), chalk.bgCyan.black(id.padEnd(18)), chalk.bgCyan.black(safeText(app.version, 7).padEnd(7)), chalk.bgCyan.black(sourceText.padEnd(8))];
+        if (isInstalled && installedVersion !== app.version) row[3] = chalk.bgCyan.yellow(safeText(app.version, 7).padEnd(7));
         table.push(row);
       } else {
         table.push([statusIcon, name, chalk.gray(id), versionText, chalk.gray(sourceText)]);
@@ -188,7 +188,7 @@ export async function createCommand(fileName: string): Promise<void> {
   };
 
   const buildSelectedTable = (): Table.Table => {
-    const table = new Table({ head: ['#', panelTitle('selected', `Selected (${selectedApps.length})`)], colWidths: [5, 25], style: { head: activePanel === 'selected' ? ['cyan'] : ['green'], border: ['gray'] } });
+    const table = new Table({ head: [panelTitle('selected', `Selected (${selectedApps.length})`), 'ID'], colWidths: [18, 20], style: { head: activePanel === 'selected' ? ['cyan'] : ['green'], border: ['gray'] } });
     if (selectedApps.length === 0) {
       table.push([{ colSpan: 2, content: chalk.gray('None selected') }]);
       return table;
@@ -197,29 +197,27 @@ export async function createCommand(fileName: string): Promise<void> {
     const pageStart = getSelectedPage() * PAGE_SIZE;
     pageApps.forEach((app, index) => {
       const globalIndex = pageStart + index;
-      const label = String(globalIndex + 1);
-      const name = safeText(app.name, 23);
-      if (activePanel === 'selected' && globalIndex === selectedCursorIndex) table.push([chalk.bgCyan.black(label.padEnd(3)), chalk.bgCyan.black(name.padEnd(23))]);
-      else table.push([label, name]);
+      const name = safeText(app.name, 16);
+      const id = safeText(app.id, 18);
+      if (activePanel === 'selected' && globalIndex === selectedCursorIndex) table.push([chalk.bgCyan.black(name.padEnd(16)), chalk.bgCyan.black(id.padEnd(18))]);
+      else table.push([name, chalk.gray(id)]);
     });
     return table;
   };
 
   const buildInstalledTable = (): Table.Table => {
-    const table = new Table({ head: ['#', panelTitle('installed', `Installed (${installedApps.length})`), 'Source'], colWidths: [5, 24, 12], style: { head: activePanel === 'installed' ? ['cyan'] : ['magenta'], border: ['gray'] } });
+    const table = new Table({ head: [panelTitle('installed', `Installed (${installedApps.length})`)], colWidths: [24], style: { head: activePanel === 'installed' ? ['cyan'] : ['magenta'], border: ['gray'] } });
     if (installedApps.length === 0) {
-      table.push([{ colSpan: 3, content: chalk.gray('No installed apps') }]);
+      table.push([chalk.gray('No installed apps')]);
       return table;
     }
     const pageApps = getCurrentInstalledApps();
     const pageStart = getInstalledPage() * PAGE_SIZE;
     pageApps.forEach((app, index) => {
       const globalIndex = pageStart + index;
-      const label = String(globalIndex + 1);
       const name = safeText(app.name, 22);
-      const source = safeText(app.source || 'local/other', 10);
-      if (activePanel === 'installed' && globalIndex === installedCursorIndex) table.push([chalk.bgCyan.black(label.padEnd(3)), chalk.bgCyan.black(name.padEnd(22)), chalk.bgCyan.black(source.padEnd(10))]);
-      else table.push([label, name, chalk.gray(source)]);
+      if (activePanel === 'installed' && globalIndex === installedCursorIndex) table.push([chalk.bgCyan.black(name.padEnd(22))]);
+      else table.push([name]);
     });
     return table;
   };
@@ -238,8 +236,7 @@ export async function createCommand(fileName: string): Promise<void> {
     const totalPages = Math.max(1, Math.ceil(filteredApps.length / PAGE_SIZE));
     console.log(chalk.bold(`Applications (Page ${getAvailablePage() + 1}/${totalPages}):`));
     if (filterSearching) console.log(chalk.gray('  Searching winget source...'));
-    const sidePanel = `${buildSelectedTable().toString()}\n\n${buildInstalledTable().toString()}`;
-    printSideBySide([buildAvailableTable().toString(), sidePanel]);
+    printSideBySide([buildAvailableTable().toString(), buildSelectedTable().toString(), buildInstalledTable().toString()]);
     console.log();
     console.log(chalk.gray('-'.repeat(60)));
     console.log(`${chalk.green('[i]')} installed  ${chalk.blue('[x]')} selected  ${chalk.gray('[ ]')} not selected`);
