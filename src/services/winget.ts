@@ -1,7 +1,96 @@
 import { execSync, spawn } from 'child_process';
 import { InstalledApp } from '../types/config';
 
+// Patterns to exclude system apps, drivers, and runtimes
+const EXCLUDED_PATTERNS = [
+  // Windows system components
+  /^Microsoft\.NET/i,
+  /^Microsoft\.VCRedist/i,
+  /^Microsoft\.VC\+\+/i,
+  /^Microsoft\.UI\.Xaml/i,
+  /^Microsoft\.Windows/i,
+  /^Microsoft\.DirectX/i,
+  /^Microsoft\.GameInput/i,
+  /^Microsoft\.Update/i,
+  /^Microsoft\.VSS/i,
+  /^Microsoft\.ODBC/i,
+  /^Microsoft\.OLE/i,
+  /^Microsoft\.Help/i,
+  /^Microsoft\.SQL.*Setup/i,
+  /^Microsoft\.VisualStudio\.Installer/i,
+  /^Microsoft\.VisualStudio\.Tools/i,
+  /WindowsAppRuntime/i,
+  /WindowsDesktopRuntime/i,
+
+  // ARP entries (non-winget registry entries)
+  /^ARP\\/i,
+  /^MSIX\\/i,
+
+  // Drivers and hardware
+  /Driver/i,
+  /^NVIDIA\.Control/i,
+  /^Realtek/i,
+  /^Synaptics/i,
+  /^Intel\./i,
+  /^AMD\./i,
+
+  // System runtimes
+  /Redistributable/i,
+  /Runtime Package/i,
+  /\.Net.*Runtime/i,
+  /^dotnet/i,
+
+  // Windows Store system apps
+  /^Microsoft\.Advertising/i,
+  /^Microsoft\.Services/i,
+  /^Microsoft\.StorePurchase/i,
+  /^Microsoft\.VP9/i,
+  /^Microsoft\.HEVC/i,
+  /^Microsoft\.AV1/i,
+  /^Microsoft\.MPEG/i,
+  /^Microsoft\.WebMedia/i,
+  /^Microsoft\.WebP/i,
+  /^Microsoft\.Raw/i,
+  /^Microsoft\.HEIFImage/i,
+
+  // Language packs
+  /Local Experience Pack/i,
+  /Language Pack/i,
+  /Speech Pack/i,
+  /Pakiet lokalizacyjny/i,
+  /本地体验包/i,
+
+  // Xbox system components
+  /^Microsoft\.Xbox.*Provider/i,
+  /^Microsoft\.Xbox.*Plugin/i,
+  /^Microsoft\.Gaming/i,
+
+  // Other system utilities
+  /^Microsoft\.Wallet/i,
+  /^Microsoft\.People/i,
+  /^Microsoft\.GetHelp/i,
+  /^Microsoft\.Getstarted/i,
+  /^Microsoft\.MixedReality/i,
+  /^Microsoft\.549981/i, // Cortana
+  /^Microsoft\.BingNews/i,
+  /^Microsoft\.BingWeather/i,
+  /^Microsoft\.ZuneMusic/i,
+  /^Microsoft\.ZuneVideo/i,
+  /Widget.*Runtime/i,
+  /Host środowiska/i,
+  /Usługi gier/i,
+];
+
 export class WingetService {
+  isSystemApp(app: InstalledApp): boolean {
+    // Check ID against excluded patterns
+    for (const pattern of EXCLUDED_PATTERNS) {
+      if (pattern.test(app.id) || pattern.test(app.name)) {
+        return true;
+      }
+    }
+    return false;
+  }
   private runCommand(command: string): string {
     try {
       return execSync(command, {

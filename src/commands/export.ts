@@ -9,15 +9,21 @@ export async function exportCommand(outputPath: string): Promise<void> {
 
   console.log(chalk.cyan('\n📦 Fetching installed applications...\n'));
 
-  const apps = winget.getInstalledApps();
+  const allApps = winget.getInstalledApps();
 
-  if (apps.length === 0) {
+  if (allApps.length === 0) {
     console.log(chalk.yellow('No applications found.'));
     return;
   }
 
-  console.log(chalk.cyan(`Found ${apps.length} installed applications`));
-  console.log(chalk.cyan('Checking availability in winget (this may take a while)...\n'));
+  // Filter out system apps, drivers, and runtimes
+  const apps = allApps.filter(app => !winget.isSystemApp(app));
+  const excludedCount = allApps.length - apps.length;
+
+  console.log(chalk.cyan(`Found ${allApps.length} installed applications`));
+  console.log(chalk.gray(`  Excluded ${excludedCount} system apps/drivers/runtimes`));
+  console.log(chalk.cyan(`  Processing ${apps.length} user applications`));
+  console.log(chalk.cyan('\nChecking availability in winget (this may take a while)...\n'));
 
   const configApps: AppConfig[] = [];
   let checked = 0;
@@ -85,7 +91,8 @@ export async function exportCommand(outputPath: string): Promise<void> {
   console.log(chalk.gray(`\nSummary:`));
   console.log(chalk.green(`  Available in winget: ${availableCount}`));
   console.log(chalk.yellow(`  Not available: ${unavailableCount}`));
-  console.log(chalk.gray(`  Total: ${apps.length}\n`));
+  console.log(chalk.gray(`  Excluded (system): ${excludedCount}`));
+  console.log(chalk.gray(`  Total exported: ${apps.length}\n`));
 
   if (unavailableCount > 0) {
     console.log(chalk.yellow('Note: Applications marked as unavailable will be skipped during installation.'));
