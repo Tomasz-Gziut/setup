@@ -14,7 +14,7 @@ export async function createCommand(fileName: string): Promise<void> {
   const selectedApps: AppConfig[] = [];
   let allApps: InstalledApp[] = [];
   let filteredApps: InstalledApp[] = [];
-  let installedIds: Set<string> = new Set();
+  let installedMap: Map<string, string> = new Map();
   let cursorIndex = 0;
   let filterMode = false;
   let filterText = '';
@@ -31,8 +31,17 @@ export async function createCommand(fileName: string): Promise<void> {
 
   process.stdout.write(chalk.gray('Loading installed applications... '));
   const installedApps = winget.getInstalledApps();
-  installedIds = new Set(installedApps.map(app => app.id));
-  console.log(chalk.green(`Done. (${installedIds.size} installed)`));
+  const currentInstalledMap = new Map<string, string>();
+  const currentInstalledByName = new Map<string, string>();
+  
+  installedApps.forEach(app => {
+    if (app.id) currentInstalledMap.set(app.id, app.version);
+    if (app.name) currentInstalledByName.set(app.name.toLowerCase(), app.version);
+  });
+  
+  installedMap = currentInstalledMap;
+  const installedByName = currentInstalledByName;
+  console.log(chalk.green(`Done. (${installedMap.size} IDs, ${installedByName.size} names)`));
 
   process.stdout.write(chalk.gray('Loading all applications from winget... '));
   allApps = await winget.searchApp('');
@@ -101,7 +110,13 @@ export async function createCommand(fileName: string): Promise<void> {
       pageApps.forEach((app, i) => {
         const globalIdx = pageStart + i;
         const isSelected = selectedApps.some(s => s.id === app.id);
-        const isInstalled = installedIds.has(app.id);
+        
+        let installedVersion = installedMap.get(app.id);
+        if (installedVersion === undefined) {
+          installedVersion = installedByName.get(app.name.toLowerCase());
+        }
+        
+        const isInstalled = installedVersion !== undefined;
         const isCursor = globalIdx === cursorIndex;
 
         // Status icon: ✓ installed, ● selected, ○ empty
@@ -117,17 +132,28 @@ export async function createCommand(fileName: string): Promise<void> {
         // Highlight entire row if cursor is on it
         const name = app.name.substring(0, 32);
         const id = app.id.substring(0, 38);
-        const version = app.version.substring(0, 12);
+        
+        let versionText = app.version.substring(0, 12);
+        if (isInstalled && installedVersion !== app.version) {
+          versionText = chalk.yellow(versionText);
+        } else if (!isCursor) {
+          versionText = chalk.gray(versionText);
+        }
 
         if (isCursor) {
-          table.push([
+          const row = [
             chalk.bgCyan.black(` ${statusIcon} `),
             chalk.bgCyan.black(name.padEnd(32)),
             chalk.bgCyan.black(id.padEnd(38)),
-            chalk.bgCyan.black(version.padEnd(12))
-          ]);
+            chalk.bgCyan.black(app.version.substring(0, 12).padEnd(12)) // Reset version color for cursor
+          ];
+          // Re-apply yellow if needed even on cursor for visibility
+          if (isInstalled && installedVersion !== app.version) {
+             row[3] = chalk.bgCyan.yellow(app.version.substring(0, 12).padEnd(12));
+          }
+          table.push(row);
         } else {
-          table.push([` ${statusIcon} `, name, chalk.gray(id), chalk.gray(version)]);
+          table.push([` ${statusIcon} `, name, chalk.gray(id), versionText]);
         }
       });
 
