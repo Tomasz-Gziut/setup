@@ -169,49 +169,37 @@ export class WingetService {
       })
       .filter(line => line.trim().length > 0);
 
-    let headerIndex = -1;
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      // Find header line that starts with "Name" (after trimming) and contains "Id"
-      if (line.trim().startsWith('Name') && line.includes('Id')) {
-        headerIndex = i;
-        break;
-      }
-    }
+    const separatorIndex = lines.findIndex(line =>
+      /^\s*-{3,}[\s-]*$/.test(line)
+    );
 
-    if (headerIndex === -1) return [];
+    if (separatorIndex === -1) return [];
 
-    const separatorLine = lines[headerIndex + 1];
-    if (!separatorLine || !separatorLine.includes('---')) return [];
+    const headerLine = lines[separatorIndex - 1] ?? '';
+    const separatorLine = lines[separatorIndex];
+    const headerMatches = Array.from(headerLine.matchAll(/\S+/g));
+    const separatorMatches = Array.from(separatorLine.matchAll(/-+/g));
 
-    // Find column positions from header line
-    const headerLine = lines[headerIndex];
-    const nameIdx = headerLine.indexOf('Name');
-    const idIdx = headerLine.indexOf('Id');
-    const versionIdx = headerLine.indexOf('Version');
-    const sourceIdx = headerLine.indexOf('Source');
+    const columnStarts = headerMatches.length >= 2
+      ? headerMatches.map(match => match.index ?? 0)
+      : separatorMatches.map(match => match.index ?? 0);
 
-    // If we can't find the header columns, try the old separator-based method
-    if (nameIdx === -1 || idIdx === -1) {
-      return [];
-    }
+    if (columnStarts.length < 2) return [];
 
     const apps: InstalledApp[] = [];
-    for (let i = headerIndex + 2; i < lines.length; i++) {
+    for (let i = separatorIndex + 1; i < lines.length; i++) {
       const line = lines[i];
-      if (!line.trim() || line.startsWith('---')) continue;
+      if (!line.trim() || line.trim().startsWith('---')) continue;
 
-      // Extract columns based on header positions
-      const name = line.substring(nameIdx, idIdx).trim();
-      const id = versionIdx !== -1
-        ? line.substring(idIdx, versionIdx).trim()
-        : line.substring(idIdx).trim();
-      const version = versionIdx !== -1 && sourceIdx !== -1
-        ? line.substring(versionIdx, sourceIdx).trim()
-        : '';
-      const source = sourceIdx !== -1
-        ? line.substring(sourceIdx).trim()
-        : '';
+      const columns = columnStarts.map((start, index) => {
+        const end = columnStarts[index + 1] ?? line.length;
+        return line.substring(start, end).trim();
+      });
+
+      const name = columns[0] ?? '';
+      const id = columns[1] ?? '';
+      const version = columns[2] ?? '';
+      const source = columns[columnStarts.length - 1] ?? '';
 
       if (name && id) {
         apps.push({ name, id, version, source });

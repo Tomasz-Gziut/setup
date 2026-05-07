@@ -9,12 +9,19 @@ import { PRESET_DIR } from '../constants';
 
 const PAGE_SIZE = 10;
 
+type InstalledMatch = {
+  version: string;
+  source: string;
+};
+
 export async function createCommand(fileName: string): Promise<void> {
   const winget = new WingetService();
   const selectedApps: AppConfig[] = [];
   let allApps: InstalledApp[] = [];
   let filteredApps: InstalledApp[] = [];
-  let installedMap: Map<string, string> = new Map();
+  let installedMap: Map<string, InstalledMatch> = new Map();
+  let installedNameEntries: Array<{ normalizedName: string; match: InstalledMatch }> = [];
+  const searchCache: Map<string, InstalledApp[]> = new Map();
   let cursorIndex = 0;
   let filterMode = false;
   let filterText = '';
@@ -29,17 +36,38 @@ export async function createCommand(fileName: string): Promise<void> {
 
   console.log(chalk.cyan(`\n🛠️  Creating config: ${chalk.bold(fullPath)}`));
 
+  const normalizeAppName = (name: string): string =>
+    name
+      .toLowerCase()
+      .replace(/\b(x64|x86|win64|win32|stable|browser)\b/g, ' ')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
   process.stdout.write(chalk.gray('Loading installed applications... '));
   const installedApps = winget.getInstalledApps();
-  const currentInstalledMap = new Map<string, string>();
-  const currentInstalledByName = new Map<string, string>();
+  const currentInstalledMap = new Map<string, InstalledMatch>();
+  const currentInstalledByName = new Map<string, InstalledMatch>();
+  const currentInstalledNameEntries: Array<{ normalizedName: string; match: InstalledMatch }> = [];
   
   installedApps.forEach(app => {
-    if (app.id) currentInstalledMap.set(app.id, app.version);
-    if (app.name) currentInstalledByName.set(app.name.toLowerCase(), app.version);
+    const installedMatch = {
+      version: app.version,
+      source: app.source || 'local/other'
+    };
+
+    if (app.id) currentInstalledMap.set(app.id.toLowerCase(), installedMatch);
+    if (app.name) {
+      const normalizedName = normalizeAppName(app.name);
+      if (normalizedName) {
+        currentInstalledByName.set(normalizedName, installedMatch);
+        currentInstalledNameEntries.push({ normalizedName, match: installedMatch });
+      }
+    }
   });
   
   installedMap = currentInstalledMap;
+  installedNameEntries = currentInstalledNameEntries;
   const installedByName = currentInstalledByName;
   console.log(chalk.green(`Done. (${installedMap.size} IDs, ${installedByName.size} names)`));
 
@@ -55,6 +83,40 @@ export async function createCommand(fileName: string): Promise<void> {
     const page = getCurrentPage();
     const start = page * PAGE_SIZE;
     return filteredApps.slice(start, start + PAGE_SIZE);
+  };
+
+  const mergeApps = (...appLists: InstalledApp[][]): InstalledApp[] => {
+    const appsById = new Map<string, InstalledApp>();
+
+    appLists.flat().forEach(app => {
+      if (!app.id) return;
+      const key = app.id.toLowerCase();
+      if (!appsById.has(key)) {
+        appsById.set(key, app);
+      }
+    });
+
+    return Array.from(appsById.values());
+  };
+
+  const findInstalledMatch = (app: InstalledApp): InstalledMatch | undefined => {
+    const installedById = installedMap.get(app.id.toLowerCase());
+    if (installedById !== undefined) return installedById;
+
+    const normalizedName = normalizeAppName(app.name);
+    if (!normalizedName) return undefined;
+
+    const exactNameMatch = installedByName.get(normalizedName);
+    if (exactNameMatch !== undefined) return exactNameMatch;
+
+    const fuzzyNameMatch = installedNameEntries.find(installed =>
+      installed.normalizedName.length >= 3 &&
+      normalizedName.length >= 3 &&
+      (installed.normalizedName.includes(normalizedName) ||
+        normalizedName.includes(installed.normalizedName))
+    );
+
+    return fuzzyNameMatch?.match;
   };
 
   const clearScreen = () => {
@@ -102,8 +164,8 @@ export async function createCommand(fileName: string): Promise<void> {
       const pageStart = currentPage * PAGE_SIZE;
 
       const table = new Table({
-        head: [' ', 'Name', 'ID', 'Version'],
-        colWidths: [5, 33, 40, 14],
+        head: [' ', 'Name', 'ID', 'Version', 'Source'],
+        colWidths: [5, 30, 35, 13, 15],
         style: { head: ['cyan'], border: ['gray'] }
       });
 
@@ -111,10 +173,9 @@ export async function createCommand(fileName: string): Promise<void> {
         const globalIdx = pageStart + i;
         const isSelected = selectedApps.some(s => s.id === app.id);
         
-        let installedVersion = installedMap.get(app.id);
-        if (installedVersion === undefined) {
-          installedVersion = installedByName.get(app.name.toLowerCase());
-        }
+        const installedMatch = findInstalledMatch(app);
+        const installedVersion = installedMatch?.version;
+        const source = installedMatch?.source ?? app.source;
         
         const isInstalled = installedVersion !== undefined;
         const isCursor = globalIdx === cursorIndex;
@@ -130,8 +191,9 @@ export async function createCommand(fileName: string): Promise<void> {
         }
 
         // Highlight entire row if cursor is on it
-        const name = app.name.substring(0, 32);
-        const id = app.id.substring(0, 38);
+        const name = app.name.substring(0, 29);
+        const id = app.id.substring(0, 33);
+        const sourceText = (source || 'N/A').substring(0, 13);
         
         let versionText = app.version.substring(0, 12);
         if (isInstalled && installedVersion !== app.version) {
@@ -143,9 +205,10 @@ export async function createCommand(fileName: string): Promise<void> {
         if (isCursor) {
           const row = [
             chalk.bgCyan.black(` ${statusIcon} `),
-            chalk.bgCyan.black(name.padEnd(32)),
-            chalk.bgCyan.black(id.padEnd(38)),
-            chalk.bgCyan.black(app.version.substring(0, 12).padEnd(12)) // Reset version color for cursor
+            chalk.bgCyan.black(name.padEnd(29)),
+            chalk.bgCyan.black(id.padEnd(33)),
+            chalk.bgCyan.black(app.version.substring(0, 12).padEnd(12)),
+            chalk.bgCyan.black(sourceText.padEnd(13))
           ];
           // Re-apply yellow if needed even on cursor for visibility
           if (isInstalled && installedVersion !== app.version) {
@@ -153,7 +216,7 @@ export async function createCommand(fileName: string): Promise<void> {
           }
           table.push(row);
         } else {
-          table.push([` ${statusIcon} `, name, chalk.gray(id), versionText]);
+          table.push([` ${statusIcon} `, name, chalk.gray(id), versionText, chalk.gray(sourceText)]);
         }
       });
 
@@ -171,13 +234,25 @@ export async function createCommand(fileName: string): Promise<void> {
     console.log(`  ${chalk.yellow('s')}       Save & exit     ${chalk.yellow('q')}       Quit without saving`);
   };
 
-  const applyFilter = () => {
-    if (filterText) {
-      const q = filterText.toLowerCase();
-      filteredApps = allApps.filter(app =>
+  const applyFilter = async () => {
+    const trimmedFilter = filterText.trim();
+
+    if (trimmedFilter) {
+      const q = trimmedFilter.toLowerCase();
+      const localMatches = allApps.filter(app =>
         app.name.toLowerCase().includes(q) ||
         app.id.toLowerCase().includes(q)
       );
+
+      let wingetMatches = searchCache.get(q);
+      if (wingetMatches === undefined) {
+        render();
+        process.stdout.write(chalk.gray('\nSearching winget source... '));
+        wingetMatches = await winget.searchApp(trimmedFilter);
+        searchCache.set(q, wingetMatches);
+      }
+      allApps = mergeApps(allApps, wingetMatches);
+      filteredApps = mergeApps(localMatches, wingetMatches);
     } else {
       filteredApps = [...allApps];
     }
@@ -228,7 +303,7 @@ export async function createCommand(fileName: string): Promise<void> {
       clearScreen();
     };
 
-    process.stdin.on('keypress', (_str, key) => {
+    process.stdin.on('keypress', async (_str, key) => {
       if (!key) return;
 
       // Handle Ctrl+C
@@ -242,7 +317,7 @@ export async function createCommand(fileName: string): Promise<void> {
         // Filter input mode
         if (key.name === 'return' || key.name === 'escape') {
           filterMode = false;
-          applyFilter();
+          await applyFilter();
           render();
         } else if (key.name === 'backspace') {
           filterText = filterText.slice(0, -1);
@@ -296,7 +371,7 @@ export async function createCommand(fileName: string): Promise<void> {
 
         case 'escape':
           filterText = '';
-          applyFilter();
+          await applyFilter();
           render();
           break;
 
