@@ -36,7 +36,7 @@ export async function createCommand(fileName: string): Promise<void> {
     fs.mkdirSync(PRESET_DIR, { recursive: true });
   }
 
-  console.log(chalk.cyan(`\n🛠️  Creating config: ${chalk.bold(fullPath)}`));
+  console.log(chalk.cyan(`\nCreating config: ${chalk.bold(fullPath)}`));
 
   const normalizeAppName = (name: string): string =>
     name
@@ -125,25 +125,49 @@ export async function createCommand(fileName: string): Promise<void> {
     process.stdout.write('\x1B[2J\x1B[H');
   };
 
+  const stripAnsi = (value: string): string =>
+    value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
+
+  const printSideBySide = (left: string, right: string, gap = 3) => {
+    const leftLines = left.split('\n');
+    const rightLines = right.split('\n');
+    const leftWidth = Math.max(...leftLines.map(line => stripAnsi(line).length));
+    const rowCount = Math.max(leftLines.length, rightLines.length);
+
+    for (let i = 0; i < rowCount; i++) {
+      const leftLine = leftLines[i] ?? '';
+      const rightLine = rightLines[i] ?? '';
+      const padding = ' '.repeat(Math.max(0, leftWidth - stripAnsi(leftLine).length + gap));
+      console.log(`${leftLine}${padding}${rightLine}`);
+    }
+  };
+
+  const buildSelectedTable = (): Table.Table => {
+    const selectedTable = new Table({
+      head: ['#', `Selected (${selectedApps.length})`],
+      colWidths: [5, 30],
+      style: { head: ['green'], border: ['gray'] }
+    });
+
+    if (selectedApps.length === 0) {
+      selectedTable.push([{ colSpan: 2, content: chalk.gray('None selected') }]);
+      return selectedTable;
+    }
+
+    selectedApps.forEach((app, index) => {
+      selectedTable.push([String(index + 1), app.name.substring(0, 28)]);
+    });
+
+    return selectedTable;
+  };
+
   const render = () => {
     clearScreen();
 
     // Header
-    console.log(chalk.cyan.bold(`🛠️  Creating config: ${configPath}`));
+    console.log(chalk.cyan.bold(`Creating config: ${configPath}`));
     console.log();
 
-    // Selected apps
-    if (selectedApps.length > 0) {
-      console.log(chalk.green.bold(`⭐ Selected (${selectedApps.length}):`));
-      const maxShow = 5;
-      selectedApps.slice(0, maxShow).forEach(app => {
-        console.log(chalk.green(`   ${app.name}`));
-      });
-      if (selectedApps.length > maxShow) {
-        console.log(chalk.gray(`   ... and ${selectedApps.length - maxShow} more`));
-      }
-      console.log();
-    }
 
     // Filter status
     const filterLabel = filterText ? `Filter: ${filterText}_ (${filteredApps.length} results)` : 'Filter: _';
@@ -158,17 +182,17 @@ export async function createCommand(fileName: string): Promise<void> {
       console.log(chalk.gray('  Searching winget source...'));
     }
 
+    const appsTable = new Table({
+      head: [' ', 'Name', 'ID', 'Version', 'Source'],
+      colWidths: [5, 24, 29, 12, 12],
+      style: { head: ['cyan'], border: ['gray'] }
+    });
+
     if (filteredApps.length === 0) {
-      console.log(chalk.yellow('  No applications found.'));
+      appsTable.push([{ colSpan: 5, content: chalk.yellow('No applications found.') }]);
     } else {
       const pageApps = getCurrentPageApps();
       const pageStart = currentPage * PAGE_SIZE;
-
-      const table = new Table({
-        head: [' ', 'Name', 'ID', 'Version', 'Source'],
-        colWidths: [5, 30, 35, 13, 15],
-        style: { head: ['cyan'], border: ['gray'] }
-      });
 
       pageApps.forEach((app, i) => {
         const globalIdx = pageStart + i;
@@ -181,22 +205,21 @@ export async function createCommand(fileName: string): Promise<void> {
         const isInstalled = installedVersion !== undefined;
         const isCursor = globalIdx === cursorIndex;
 
-        // Status icon: ✓ installed, ● selected, ○ empty
+        // Status marker: I installed, * selected, blank empty
         let statusIcon: string;
         if (isInstalled) {
-          statusIcon = chalk.green('✓');
+          statusIcon = chalk.green('I');
         } else if (isSelected) {
-          statusIcon = chalk.blue('●');
+          statusIcon = chalk.blue('*');
         } else {
-          statusIcon = chalk.gray('○');
+          statusIcon = chalk.gray(' ');
         }
 
-        // Highlight entire row if cursor is on it
-        const name = app.name.substring(0, 29);
-        const id = app.id.substring(0, 33);
-        const sourceText = (source || 'N/A').substring(0, 13);
+        const name = app.name.substring(0, 23);
+        const id = app.id.substring(0, 27);
+        const sourceText = (source || 'N/A').substring(0, 10);
         
-        let versionText = app.version.substring(0, 12);
+        let versionText = app.version.substring(0, 10);
         if (isInstalled && installedVersion !== app.version) {
           versionText = chalk.yellow(versionText);
         } else if (!isCursor) {
@@ -206,32 +229,30 @@ export async function createCommand(fileName: string): Promise<void> {
         if (isCursor) {
           const row = [
             chalk.bgCyan.black(` ${statusIcon} `),
-            chalk.bgCyan.black(name.padEnd(29)),
-            chalk.bgCyan.black(id.padEnd(33)),
-            chalk.bgCyan.black(app.version.substring(0, 12).padEnd(12)),
-            chalk.bgCyan.black(sourceText.padEnd(13))
+            chalk.bgCyan.black(name.padEnd(23)),
+            chalk.bgCyan.black(id.padEnd(27)),
+            chalk.bgCyan.black(app.version.substring(0, 10).padEnd(10)),
+            chalk.bgCyan.black(sourceText.padEnd(10))
           ];
-          // Re-apply yellow if needed even on cursor for visibility
           if (isInstalled && installedVersion !== app.version) {
-             row[3] = chalk.bgCyan.yellow(app.version.substring(0, 12).padEnd(12));
+             row[3] = chalk.bgCyan.yellow(app.version.substring(0, 10).padEnd(10));
           }
-          table.push(row);
+          appsTable.push(row);
         } else {
-          table.push([` ${statusIcon} `, name, chalk.gray(id), versionText, chalk.gray(sourceText)]);
+          appsTable.push([` ${statusIcon} `, name, chalk.gray(id), versionText, chalk.gray(sourceText)]);
         }
       });
-
-      console.log(table.toString());
     }
 
+    printSideBySide(appsTable.toString(), buildSelectedTable().toString());
     // Legend & Help
     console.log();
     console.log(chalk.gray('─'.repeat(60)));
-    console.log(`${chalk.green('✓')} installed  ${chalk.blue('●')} selected  ${chalk.gray('○')} not selected`);
+    console.log(`${chalk.green('[I]')} installed  ${chalk.blue('[*]')} selected  ${chalk.gray('[ ]')} not selected`);
     console.log();
     console.log(chalk.bold('Controls:'));
     console.log(`  ${chalk.yellow('Type')}    Filter         ${chalk.yellow('Backspace')} Delete char`);
-    console.log(`  ${chalk.yellow('?/?')}     Navigate       ${chalk.yellow('Enter')}     Toggle selection`);
+    console.log(`  ${chalk.yellow('Up/Down')} Navigate       ${chalk.yellow('Enter')}     Toggle selection`);
     console.log(`  ${chalk.yellow('Ctrl+S')}  Save & exit    ${chalk.yellow('Ctrl+Q')}    Quit without saving`);
   };
 
@@ -354,11 +375,11 @@ export async function createCommand(fileName: string): Promise<void> {
     const saveAndExit = () => {
       if (save()) {
         cleanup();
-        console.log(chalk.green(`? Saved ${selectedApps.length} apps to ${fullPath}`));
+        console.log(chalk.green(`Saved ${selectedApps.length} apps to ${fullPath}`));
         resolve();
       } else {
         clearScreen();
-        console.log(chalk.red.bold('\n  ??  No applications selected!\n'));
+        console.log(chalk.red.bold('\n  No applications selected!\n'));
         setTimeout(() => render(), 1000);
       }
     };
