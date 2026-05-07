@@ -22,6 +22,9 @@ export async function createCommand(fileName: string): Promise<void> {
   let installedMap: Map<string, InstalledMatch> = new Map();
   let installedNameEntries: Array<{ normalizedName: string; match: InstalledMatch }> = [];
   const searchCache: Map<string, InstalledApp[]> = new Map();
+  let filterSearchTimer: NodeJS.Timeout | undefined;
+  let filterSearchToken = 0;
+  let filterSearching = false;
   let cursorIndex = 0;
   let filterMode = false;
   let filterText = '';
@@ -145,7 +148,7 @@ export async function createCommand(fileName: string): Promise<void> {
 
     // Filter status
     if (filterMode) {
-      console.log(chalk.yellow.bold(`🔍 Filter: ${filterText}_`));
+      console.log(chalk.yellow.bold(`?? Filter: ${filterText}_`));
       console.log();
     } else if (filterText) {
       console.log(chalk.blue(`🔍 Filtered by: "${filterText}" (${filteredApps.length} results)`));
@@ -156,6 +159,9 @@ export async function createCommand(fileName: string): Promise<void> {
     const totalPages = getTotalPages();
     const currentPage = getCurrentPage();
     console.log(chalk.bold(`Applications (Page ${currentPage + 1}/${totalPages || 1}):`));
+    if (filterSearching) {
+      console.log(chalk.gray('  Searching winget source...'));
+    }
 
     if (filteredApps.length === 0) {
       console.log(chalk.yellow('  No applications found.'));
@@ -230,33 +236,77 @@ export async function createCommand(fileName: string): Promise<void> {
     console.log();
     console.log(chalk.bold('Controls:'));
     console.log(`  ${chalk.yellow('↑/↓')}     Navigate       ${chalk.yellow('Enter')}   Toggle selection`);
-    console.log(`  ${chalk.yellow('f')}       Filter          ${chalk.yellow('Esc')}     Clear filter`);
+    console.log(`  ${chalk.yellow('f')}       Edit filter     ${chalk.yellow('Backspace')} Clear text`);
     console.log(`  ${chalk.yellow('s')}       Save & exit     ${chalk.yellow('q')}       Quit without saving`);
   };
 
-  const applyFilter = async () => {
+  const getLocalMatches = (q: string): InstalledApp[] =>
+    allApps.filter(app =>
+      app.name.toLowerCase().includes(q) ||
+      app.id.toLowerCase().includes(q)
+    );
+
+  const applyLocalFilter = () => {
     const trimmedFilter = filterText.trim();
 
     if (trimmedFilter) {
-      const q = trimmedFilter.toLowerCase();
-      const localMatches = allApps.filter(app =>
-        app.name.toLowerCase().includes(q) ||
-        app.id.toLowerCase().includes(q)
-      );
-
-      let wingetMatches = searchCache.get(q);
-      if (wingetMatches === undefined) {
-        render();
-        process.stdout.write(chalk.gray('\nSearching winget source... '));
-        wingetMatches = await winget.searchApp(trimmedFilter);
-        searchCache.set(q, wingetMatches);
-      }
-      allApps = mergeApps(allApps, wingetMatches);
-      filteredApps = mergeApps(localMatches, wingetMatches);
+      filteredApps = getLocalMatches(trimmedFilter.toLowerCase());
     } else {
       filteredApps = [...allApps];
     }
     cursorIndex = 0;
+  };
+
+  const applyWingetFilter = async (trimmedFilter: string) => {
+    const q = trimmedFilter.toLowerCase();
+    let wingetMatches = searchCache.get(q);
+
+    if (wingetMatches === undefined) {
+      filterSearching = true;
+      render();
+      wingetMatches = await winget.searchApp(trimmedFilter);
+      searchCache.set(q, wingetMatches);
+      filterSearching = false;
+    }
+
+    allApps = mergeApps(allApps, wingetMatches);
+
+    if (filterText.trim().toLowerCase() === q) {
+      filteredApps = mergeApps(getLocalMatches(q), wingetMatches);
+      cursorIndex = 0;
+    }
+  };
+
+  const scheduleWingetFilter = () => {
+    if (filterSearchTimer) {
+      clearTimeout(filterSearchTimer);
+    }
+
+    const trimmedFilter = filterText.trim();
+    if (trimmedFilter.length < 3) {
+      filterSearching = false;
+      return;
+    }
+
+    const token = ++filterSearchToken;
+    filterSearchTimer = setTimeout(async () => {
+      if (token !== filterSearchToken) return;
+      await applyWingetFilter(trimmedFilter);
+      if (token === filterSearchToken) render();
+    }, 450);
+  };
+
+  const applyFilter = async () => {
+    if (filterSearchTimer) {
+      clearTimeout(filterSearchTimer);
+    }
+
+    applyLocalFilter();
+
+    const trimmedFilter = filterText.trim();
+    if (trimmedFilter.length >= 3) {
+      await applyWingetFilter(trimmedFilter);
+    }
   };
 
   const toggleSelection = () => {
@@ -296,6 +346,9 @@ export async function createCommand(fileName: string): Promise<void> {
 
   return new Promise((resolve) => {
     const cleanup = () => {
+      if (filterSearchTimer) {
+        clearTimeout(filterSearchTimer);
+      }
       if (process.stdin.isTTY) {
         process.stdin.setRawMode(false);
       }
@@ -315,15 +368,22 @@ export async function createCommand(fileName: string): Promise<void> {
 
       if (filterMode) {
         // Filter input mode
-        if (key.name === 'return' || key.name === 'escape') {
+        if (key.name === 'return') {
           filterMode = false;
           await applyFilter();
           render();
+        } else if (key.name === 'escape') {
+          filterMode = false;
+          render();
         } else if (key.name === 'backspace') {
           filterText = filterText.slice(0, -1);
+          applyLocalFilter();
+          scheduleWingetFilter();
           render();
         } else if (key.sequence && key.sequence.length === 1 && key.sequence.charCodeAt(0) >= 32) {
           filterText += key.sequence;
+          applyLocalFilter();
+          scheduleWingetFilter();
           render();
         }
         return;
@@ -365,13 +425,10 @@ export async function createCommand(fileName: string): Promise<void> {
 
         case 'f':
           filterMode = true;
-          filterText = '';
           render();
           break;
 
         case 'escape':
-          filterText = '';
-          await applyFilter();
           render();
           break;
 
