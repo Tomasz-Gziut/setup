@@ -13,6 +13,7 @@ export async function createCommand(fileName: string): Promise<void> {
   const selectedApps: AppConfig[] = [];
   let allApps: InstalledApp[] = [];
   let filteredApps: InstalledApp[] = [];
+  let installedIds: Set<string> = new Set();
   let cursorIndex = 0;
   let filterMode = false;
   let filterText = '';
@@ -21,8 +22,13 @@ export async function createCommand(fileName: string): Promise<void> {
   const fullPath = path.resolve(process.cwd(), configPath);
 
   console.log(chalk.cyan(`\n🛠️  Creating config: ${chalk.bold(configPath)}`));
-  process.stdout.write(chalk.gray('Loading all applications from winget... '));
 
+  process.stdout.write(chalk.gray('Loading installed applications... '));
+  const installedApps = winget.getInstalledApps();
+  installedIds = new Set(installedApps.map(app => app.id));
+  console.log(chalk.green(`Done. (${installedIds.size} installed)`));
+
+  process.stdout.write(chalk.gray('Loading all applications from winget... '));
   allApps = await winget.searchApp('');
   filteredApps = [...allApps];
   console.log(chalk.green(`Done. (${filteredApps.length} apps)\n`));
@@ -81,31 +87,52 @@ export async function createCommand(fileName: string): Promise<void> {
       const pageStart = currentPage * PAGE_SIZE;
 
       const table = new Table({
-        head: ['', 'Name', 'ID', 'Version'],
-        colWidths: [4, 35, 40, 15],
+        head: [' ', 'Name', 'ID', 'Version'],
+        colWidths: [5, 33, 40, 14],
         style: { head: ['cyan'], border: ['gray'] }
       });
 
       pageApps.forEach((app, i) => {
         const globalIdx = pageStart + i;
         const isSelected = selectedApps.some(s => s.id === app.id);
+        const isInstalled = installedIds.has(app.id);
         const isCursor = globalIdx === cursorIndex;
 
-        const prefix = isCursor ? chalk.cyan('▶') : ' ';
-        const checkbox = isSelected ? chalk.green('[✓]') : '[ ]';
-        const name = isCursor ? chalk.cyan.bold(app.name.substring(0, 33)) : app.name.substring(0, 33);
-        const id = isCursor ? chalk.cyan(app.id.substring(0, 38)) : chalk.gray(app.id.substring(0, 38));
-        const version = chalk.gray(app.version.substring(0, 13));
+        // Status icon: ✓ installed, ● selected, ○ empty
+        let statusIcon: string;
+        if (isInstalled) {
+          statusIcon = chalk.green('✓');
+        } else if (isSelected) {
+          statusIcon = chalk.blue('●');
+        } else {
+          statusIcon = chalk.gray('○');
+        }
 
-        table.push([`${prefix}${checkbox}`, name, id, version]);
+        // Highlight entire row if cursor is on it
+        const name = app.name.substring(0, 32);
+        const id = app.id.substring(0, 38);
+        const version = app.version.substring(0, 12);
+
+        if (isCursor) {
+          table.push([
+            chalk.bgCyan.black(` ${statusIcon} `),
+            chalk.bgCyan.black(name.padEnd(32)),
+            chalk.bgCyan.black(id.padEnd(38)),
+            chalk.bgCyan.black(version.padEnd(12))
+          ]);
+        } else {
+          table.push([` ${statusIcon} `, name, chalk.gray(id), chalk.gray(version)]);
+        }
       });
 
       console.log(table.toString());
     }
 
-    // Help
+    // Legend & Help
     console.log();
     console.log(chalk.gray('─'.repeat(60)));
+    console.log(`${chalk.green('✓')} installed  ${chalk.blue('●')} selected  ${chalk.gray('○')} not selected`);
+    console.log();
     console.log(chalk.bold('Controls:'));
     console.log(`  ${chalk.yellow('↑/↓')}     Navigate       ${chalk.yellow('Enter')}   Toggle selection`);
     console.log(`  ${chalk.yellow('f')}       Filter          ${chalk.yellow('Esc')}     Clear filter`);
