@@ -107,7 +107,7 @@ export class WingetService {
 
   async installApp(id: string): Promise<{ success: boolean; message: string }> {
     return new Promise((resolve) => {
-      const process = spawn('winget', ['install', '--id', id, '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity'], {
+      const process = spawn('winget', ['install', '--id', id, '--silent', '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity'], {
         shell: true,
         stdio: ['ignore', 'pipe', 'pipe']
       });
@@ -143,7 +143,7 @@ export class WingetService {
 
   async uninstallApp(id: string): Promise<{ success: boolean; message: string }> {
     return new Promise((resolve) => {
-      const process = spawn('winget', ['uninstall', '--id', id, '--disable-interactivity'], {
+      const process = spawn('winget', ['uninstall', '--id', id, '--silent', '--disable-interactivity'], {
         shell: true,
         stdio: ['ignore', 'pipe', 'pipe']
       });
