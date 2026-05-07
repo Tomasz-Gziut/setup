@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import { showCommand } from './commands/show';
 import { installCommand } from './commands/install';
 import { exportCommand } from './commands/export';
+import { createCommand } from './commands/create';
 
 const program = new Command();
 
@@ -18,6 +19,15 @@ program
   .action(async () => {
     await showCommand();
   });
+
+program
+  .command('create')
+  .description('Create a new configuration file interactively')
+  .argument('<fileName>', 'Name of the configuration file to create')
+  .action(async (fileName: string) => {
+    await createCommand(fileName);
+  });
+
 
 program
   .command('install')

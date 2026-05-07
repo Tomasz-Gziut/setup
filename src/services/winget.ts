@@ -3,7 +3,6 @@ import { InstalledApp } from '../types/config';
 
 // Patterns to exclude system apps, drivers, and runtimes
 const EXCLUDED_PATTERNS = [
-  // Windows system components
   /^Microsoft\.NET/i,
   /^Microsoft\.VCRedist/i,
   /^Microsoft\.VC\+\+/i,
@@ -21,26 +20,18 @@ const EXCLUDED_PATTERNS = [
   /^Microsoft\.VisualStudio\.Tools/i,
   /WindowsAppRuntime/i,
   /WindowsDesktopRuntime/i,
-
-  // ARP entries (non-winget registry entries)
   /^ARP\\/i,
   /^MSIX\\/i,
-
-  // Drivers and hardware
   /Driver/i,
   /^NVIDIA\.Control/i,
   /^Realtek/i,
   /^Synaptics/i,
   /^Intel\./i,
   /^AMD\./i,
-
-  // System runtimes
   /Redistributable/i,
   /Runtime Package/i,
   /\.Net.*Runtime/i,
   /^dotnet/i,
-
-  // Windows Store system apps
   /^Microsoft\.Advertising/i,
   /^Microsoft\.Services/i,
   /^Microsoft\.StorePurchase/i,
@@ -52,20 +43,14 @@ const EXCLUDED_PATTERNS = [
   /^Microsoft\.WebP/i,
   /^Microsoft\.Raw/i,
   /^Microsoft\.HEIFImage/i,
-
-  // Language packs
   /Local Experience Pack/i,
   /Language Pack/i,
   /Speech Pack/i,
   /Pakiet lokalizacyjny/i,
   /本地体验包/i,
-
-  // Xbox system components
   /^Microsoft\.Xbox.*Provider/i,
   /^Microsoft\.Xbox.*Plugin/i,
   /^Microsoft\.Gaming/i,
-
-  // Other system utilities
   /^Microsoft\.Wallet/i,
   /^Microsoft\.People/i,
   /^Microsoft\.GetHelp/i,
@@ -83,7 +68,6 @@ const EXCLUDED_PATTERNS = [
 
 export class WingetService {
   isSystemApp(app: InstalledApp): boolean {
-    // Check ID against excluded patterns
     for (const pattern of EXCLUDED_PATTERNS) {
       if (pattern.test(app.id) || pattern.test(app.name)) {
         return true;
@@ -91,6 +75,7 @@ export class WingetService {
     }
     return false;
   }
+
   private runCommand(command: string): string {
     try {
       return execSync(command, {
@@ -108,79 +93,7 @@ export class WingetService {
 
   getInstalledApps(): InstalledApp[] {
     const rawOutput = this.runCommand('winget list --disable-interactivity');
-    // Clean up Windows line endings
-    const cleanOutput = rawOutput.replace(/\r/g, '');
-    const lines = cleanOutput.split('\n');
-
-    // Find separator line (all dashes) to detect column widths
-    let separatorIndex = -1;
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].match(/^-{20,}$/)) {
-        separatorIndex = i;
-        break;
-      }
-    }
-
-    if (separatorIndex === -1) {
-      return [];
-    }
-
-    // Find header line (should contain Name and Id)
-    let headerLine = '';
-    for (let i = separatorIndex - 1; i >= 0; i--) {
-      if (lines[i].includes('Name') && lines[i].includes('Id')) {
-        // Extract just the header portion (after any spinner animation)
-        const nameIdx = lines[i].lastIndexOf('Name');
-        headerLine = lines[i].substring(nameIdx);
-        break;
-      }
-    }
-
-    if (!headerLine) {
-      return [];
-    }
-
-    // Find column positions from header
-    const idPos = headerLine.indexOf('Id');
-    const versionPos = headerLine.indexOf('Version');
-    const availablePos = headerLine.indexOf('Available');
-    const sourcePos = headerLine.indexOf('Source');
-
-    if (idPos === -1 || versionPos === -1) {
-      return [];
-    }
-
-    const apps: InstalledApp[] = [];
-
-    // Parse each app line (after separator)
-    for (let i = separatorIndex + 1; i < lines.length; i++) {
-      const line = lines[i];
-      if (!line.trim() || line.includes('upgrades available')) continue;
-
-      // Extract based on column positions
-      const name = line.substring(0, idPos).trim();
-      const id = line.substring(idPos, versionPos).trim();
-
-      let version: string;
-      let source: string;
-
-      if (availablePos !== -1 && sourcePos !== -1) {
-        version = line.substring(versionPos, availablePos).trim();
-        source = line.substring(sourcePos).trim();
-      } else if (sourcePos !== -1) {
-        version = line.substring(versionPos, sourcePos).trim();
-        source = line.substring(sourcePos).trim();
-      } else {
-        version = line.substring(versionPos).trim();
-        source = '';
-      }
-
-      if (name && id) {
-        apps.push({ name, id, version, source });
-      }
-    }
-
-    return apps;
+    return this.parseWingetTable(rawOutput);
   }
 
   async isAvailableInWinget(id: string): Promise<boolean> {
@@ -204,11 +117,8 @@ export class WingetService {
 
       process.stdout?.on('data', (data) => {
         output += data.toString();
-        // Print progress
         const text = data.toString().trim();
-        if (text) {
-          console.log(`  ${text}`);
-        }
+        if (text) console.log(`  ${text}`);
       });
 
       process.stderr?.on('data', (data) => {
@@ -233,62 +143,80 @@ export class WingetService {
 
   async searchApp(query: string): Promise<InstalledApp[]> {
     try {
-      const output = this.runCommand(`winget search "${query}" --disable-interactivity`);
-      const lines = output.split('\n');
+      const cmd = query
+        ? `winget search "${query}" --disable-interactivity`
+        : `winget search "" --disable-interactivity`;
 
-      let headerIndex = -1;
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i].includes('Name') && lines[i].includes('Id')) {
-          headerIndex = i;
-          break;
-        }
-      }
-
-      if (headerIndex === -1) return [];
-
-      const separatorLine = lines[headerIndex + 1];
-      if (!separatorLine?.includes('-')) return [];
-
-      const columns: { start: number; end: number }[] = [];
-      let inDash = false;
-      let start = 0;
-
-      for (let i = 0; i <= separatorLine.length; i++) {
-        const char = separatorLine[i];
-        if (char === '-' && !inDash) {
-          inDash = true;
-          start = i;
-        } else if (char !== '-' && inDash) {
-          inDash = false;
-          columns.push({ start, end: i });
-        }
-      }
-
-      const apps: InstalledApp[] = [];
-
-      for (let i = headerIndex + 2; i < lines.length; i++) {
-        const line = lines[i];
-        if (!line.trim()) continue;
-
-        if (columns.length >= 2) {
-          const name = line.substring(columns[0].start, columns[0].end).trim();
-          const id = line.substring(columns[1].start, columns[1].end).trim();
-          const version = columns.length >= 3
-            ? line.substring(columns[2].start, columns[2].end).trim()
-            : '';
-          const source = columns.length >= 4
-            ? line.substring(columns[3].start, columns[3].end || line.length).trim()
-            : '';
-
-          if (name && id && !name.includes('---')) {
-            apps.push({ name, id, version, source });
-          }
-        }
-      }
-
-      return apps;
+      const output = this.runCommand(cmd);
+      return this.parseWingetTable(output);
     } catch {
       return [];
     }
+  }
+
+  private parseWingetTable(rawOutput: string): InstalledApp[] {
+    // Split by both \r\n and \n, then filter out progress spinner lines
+    // Winget uses \r to overwrite progress lines, so we need to handle this
+    const lines = rawOutput
+      .split(/\r?\n/)
+      .map(line => {
+        // If line contains \r (progress updates), take only the last segment
+        if (line.includes('\r')) {
+          const segments = line.split('\r');
+          return segments[segments.length - 1];
+        }
+        return line;
+      })
+      .filter(line => line.trim().length > 0);
+
+    let headerIndex = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      // Find header line that starts with "Name" (after trimming) and contains "Id"
+      if (line.trim().startsWith('Name') && line.includes('Id')) {
+        headerIndex = i;
+        break;
+      }
+    }
+
+    if (headerIndex === -1) return [];
+
+    const separatorLine = lines[headerIndex + 1];
+    if (!separatorLine || !separatorLine.includes('---')) return [];
+
+    // Find column positions from header line
+    const headerLine = lines[headerIndex];
+    const nameIdx = headerLine.indexOf('Name');
+    const idIdx = headerLine.indexOf('Id');
+    const versionIdx = headerLine.indexOf('Version');
+    const sourceIdx = headerLine.indexOf('Source');
+
+    // If we can't find the header columns, try the old separator-based method
+    if (nameIdx === -1 || idIdx === -1) {
+      return [];
+    }
+
+    const apps: InstalledApp[] = [];
+    for (let i = headerIndex + 2; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line.trim() || line.startsWith('---')) continue;
+
+      // Extract columns based on header positions
+      const name = line.substring(nameIdx, idIdx).trim();
+      const id = versionIdx !== -1
+        ? line.substring(idIdx, versionIdx).trim()
+        : line.substring(idIdx).trim();
+      const version = versionIdx !== -1 && sourceIdx !== -1
+        ? line.substring(versionIdx, sourceIdx).trim()
+        : '';
+      const source = sourceIdx !== -1
+        ? line.substring(sourceIdx).trim()
+        : '';
+
+      if (name && id) {
+        apps.push({ name, id, version, source });
+      }
+    }
+    return apps;
   }
 }
