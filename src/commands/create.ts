@@ -26,7 +26,6 @@ export async function createCommand(fileName: string): Promise<void> {
   let filterSearchToken = 0;
   let filterSearching = false;
   let cursorIndex = 0;
-  let filterMode = false;
   let filterText = '';
 
   const configPath = fileName.endsWith('.json') ? fileName : `${fileName}.json`;
@@ -147,13 +146,9 @@ export async function createCommand(fileName: string): Promise<void> {
     }
 
     // Filter status
-    if (filterMode) {
-      console.log(chalk.yellow.bold(`?? Filter: ${filterText}_`));
-      console.log();
-    } else if (filterText) {
-      console.log(chalk.blue(`🔍 Filtered by: "${filterText}" (${filteredApps.length} results)`));
-      console.log();
-    }
+    const filterLabel = filterText ? `Filter: ${filterText}_ (${filteredApps.length} results)` : 'Filter: _';
+    console.log(chalk.yellow.bold(filterLabel));
+    console.log();
 
     // Apps table
     const totalPages = getTotalPages();
@@ -235,9 +230,9 @@ export async function createCommand(fileName: string): Promise<void> {
     console.log(`${chalk.green('✓')} installed  ${chalk.blue('●')} selected  ${chalk.gray('○')} not selected`);
     console.log();
     console.log(chalk.bold('Controls:'));
-    console.log(`  ${chalk.yellow('↑/↓')}     Navigate       ${chalk.yellow('Enter')}   Toggle selection`);
-    console.log(`  ${chalk.yellow('f')}       Edit filter     ${chalk.yellow('Backspace')} Clear text`);
-    console.log(`  ${chalk.yellow('s')}       Save & exit     ${chalk.yellow('q')}       Quit without saving`);
+    console.log(`  ${chalk.yellow('Type')}    Filter         ${chalk.yellow('Backspace')} Delete char`);
+    console.log(`  ${chalk.yellow('?/?')}     Navigate       ${chalk.yellow('Enter')}     Toggle selection`);
+    console.log(`  ${chalk.yellow('Ctrl+S')}  Save & exit    ${chalk.yellow('Ctrl+Q')}    Quit without saving`);
   };
 
   const getLocalMatches = (q: string): InstalledApp[] =>
@@ -356,6 +351,18 @@ export async function createCommand(fileName: string): Promise<void> {
       clearScreen();
     };
 
+    const saveAndExit = () => {
+      if (save()) {
+        cleanup();
+        console.log(chalk.green(`? Saved ${selectedApps.length} apps to ${fullPath}`));
+        resolve();
+      } else {
+        clearScreen();
+        console.log(chalk.red.bold('\n  ??  No applications selected!\n'));
+        setTimeout(() => render(), 1000);
+      }
+    };
+
     process.stdin.on('keypress', async (_str, key) => {
       if (!key) return;
 
@@ -366,30 +373,35 @@ export async function createCommand(fileName: string): Promise<void> {
         process.exit(0);
       }
 
-      if (filterMode) {
-        // Filter input mode
-        if (key.name === 'return') {
-          filterMode = false;
-          await applyFilter();
-          render();
-        } else if (key.name === 'escape') {
-          filterMode = false;
-          render();
-        } else if (key.name === 'backspace') {
-          filterText = filterText.slice(0, -1);
-          applyLocalFilter();
-          scheduleWingetFilter();
-          render();
-        } else if (key.sequence && key.sequence.length === 1 && key.sequence.charCodeAt(0) >= 32) {
-          filterText += key.sequence;
-          applyLocalFilter();
-          scheduleWingetFilter();
-          render();
-        }
+      if (key.ctrl && key.name === 's') {
+        saveAndExit();
         return;
       }
 
-      // Normal mode
+      if (key.ctrl && key.name === 'q') {
+        cleanup();
+        console.log(chalk.yellow('Exited without saving.'));
+        resolve();
+        return;
+      }
+
+      if (key.name === 'backspace') {
+        filterText = filterText.slice(0, -1);
+        applyLocalFilter();
+        scheduleWingetFilter();
+        render();
+        return;
+      }
+
+      if (!key.ctrl && !key.meta && key.sequence && key.sequence.length === 1 && key.sequence.charCodeAt(0) >= 32) {
+        filterText += key.sequence;
+        applyLocalFilter();
+        scheduleWingetFilter();
+        render();
+        return;
+      }
+
+      // Navigation mode
       switch (key.name) {
         case 'up':
         case 'k':
@@ -423,32 +435,8 @@ export async function createCommand(fileName: string): Promise<void> {
           render();
           break;
 
-        case 'f':
-          filterMode = true;
-          render();
-          break;
-
         case 'escape':
           render();
-          break;
-
-        case 's':
-          if (save()) {
-            cleanup();
-            console.log(chalk.green(`✅ Saved ${selectedApps.length} apps to ${fullPath}`));
-            resolve();
-          } else {
-            // Flash message - no apps selected
-            clearScreen();
-            console.log(chalk.red.bold('\n  ⚠️  No applications selected!\n'));
-            setTimeout(() => render(), 1000);
-          }
-          break;
-
-        case 'q':
-          cleanup();
-          console.log(chalk.yellow('Exited without saving.'));
-          resolve();
           break;
       }
     });
