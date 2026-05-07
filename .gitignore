@@ -5,8 +5,8 @@ node_modules/
 dist/
 build/
 
-# Executables (built locally)
-*.exe
+# Executables (keep setup.exe for releases)
+# *.exe
 
 # Logs
 *.log
