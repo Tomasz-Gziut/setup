@@ -377,9 +377,12 @@ export async function createCommand(fileName: string): Promise<void> {
                 await new Promise(resolve => setTimeout(resolve, 1500));
               }
             }
+            clearScreen();
+            console.log(chalk.gray('Refreshing installed applications list...'));
             installedApps = winget.getInstalledApps().filter(app => !winget.isSystemApp(app));
             rebuildInstalledIndexes();
             applyLocalFilter();
+            render();
           }
         };
         render();
@@ -408,9 +411,12 @@ export async function createCommand(fileName: string): Promise<void> {
                 await new Promise(resolve => setTimeout(resolve, 1500));
               }
             }
+            clearScreen();
+            console.log(chalk.gray('Refreshing installed applications list...'));
             installedApps = winget.getInstalledApps().filter(app => !winget.isSystemApp(app));
             rebuildInstalledIndexes();
             applyLocalFilter();
+            render();
           }
         };
         render();
