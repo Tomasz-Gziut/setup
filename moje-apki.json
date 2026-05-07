@@ -1,0 +1,10 @@
+{
+  "apps": [
+    {
+      "id": "OpenAI.Codex",
+      "name": "Codex CLI",
+      "version": "0.128.0",
+      "availableInWinget": true
+    }
+  ]
+}

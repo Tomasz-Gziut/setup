@@ -2,8 +2,141 @@ import fs from 'fs';
 import path from 'path';
 import chalk from 'chalk';
 import Table from 'cli-table3';
+import { execSync } from 'child_process';
 import { Config } from '../types/config';
 import { WingetService } from '../services/winget';
+
+function createExeAliases(): string[] {
+  const userHome = process.env.USERPROFILE || '';
+  const wingetLinksPath = path.join(userHome, 'AppData', 'Local', 'Microsoft', 'WinGet', 'Links');
+  const wingetPackagesPath = path.join(userHome, 'AppData', 'Local', 'Microsoft', 'WinGet', 'Packages');
+
+  const aliasesCreated: string[] = [];
+
+  // Create Links directory if it doesn't exist
+  if (!fs.existsSync(wingetLinksPath)) {
+    try {
+      fs.mkdirSync(wingetLinksPath, { recursive: true });
+    } catch {
+      return aliasesCreated;
+    }
+  }
+
+  if (!fs.existsSync(wingetPackagesPath)) {
+    return aliasesCreated;
+  }
+
+  try {
+    const packages = fs.readdirSync(wingetPackagesPath);
+    for (const pkg of packages) {
+      const pkgPath = path.join(wingetPackagesPath, pkg);
+      if (!fs.statSync(pkgPath).isDirectory()) continue;
+
+      const files = fs.readdirSync(pkgPath);
+      for (const file of files) {
+        if (!file.endsWith('.exe')) continue;
+
+        // Extract simple name from complex exe names like "codex-x86_64-pc-windows-msvc.exe"
+        let simpleName = file;
+
+        // Remove architecture suffixes
+        simpleName = simpleName.replace(/-x86_64-pc-windows-msvc\.exe$/i, '.exe');
+        simpleName = simpleName.replace(/-x64\.exe$/i, '.exe');
+        simpleName = simpleName.replace(/-x86\.exe$/i, '.exe');
+        simpleName = simpleName.replace(/-win64\.exe$/i, '.exe');
+        simpleName = simpleName.replace(/-win32\.exe$/i, '.exe');
+        simpleName = simpleName.replace(/-windows\.exe$/i, '.exe');
+
+        // If name was simplified, create an alias
+        if (simpleName !== file) {
+          const aliasPath = path.join(wingetLinksPath, simpleName);
+          const targetPath = path.join(pkgPath, file);
+
+          if (!fs.existsSync(aliasPath)) {
+            try {
+              // Copy the exe as alias (symlinks require admin on Windows)
+              fs.copyFileSync(targetPath, aliasPath);
+              aliasesCreated.push(simpleName.replace('.exe', ''));
+            } catch {
+              // Try creating a cmd wrapper instead
+              const cmdPath = aliasPath.replace('.exe', '.cmd');
+              if (!fs.existsSync(cmdPath)) {
+                try {
+                  fs.writeFileSync(cmdPath, `@echo off\n"${targetPath}" %*`);
+                  aliasesCreated.push(simpleName.replace('.exe', ''));
+                } catch {
+                  // Ignore
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // Ignore errors
+  }
+
+  return aliasesCreated;
+}
+
+function ensureWingetPathsConfigured(): { linksAdded: boolean; packagesAdded: string[] } {
+  const userHome = process.env.USERPROFILE || '';
+  const wingetLinksPath = path.join(userHome, 'AppData', 'Local', 'Microsoft', 'WinGet', 'Links');
+  const wingetPackagesPath = path.join(userHome, 'AppData', 'Local', 'Microsoft', 'WinGet', 'Packages');
+
+  let linksAdded = false;
+  const packagesAdded: string[] = [];
+
+  try {
+    // Get current user PATH
+    const currentPath = execSync('powershell -Command "[Environment]::GetEnvironmentVariable(\'Path\', \'User\')"', {
+      encoding: 'utf-8'
+    }).trim();
+
+    const pathsToAdd: string[] = [];
+
+    // Check WinGet Links
+    if (fs.existsSync(wingetLinksPath)) {
+      if (!currentPath.toLowerCase().includes(wingetLinksPath.toLowerCase())) {
+        pathsToAdd.push(wingetLinksPath);
+        linksAdded = true;
+      }
+    }
+
+    // Check WinGet Packages - find directories with .exe files
+    if (fs.existsSync(wingetPackagesPath)) {
+      const packages = fs.readdirSync(wingetPackagesPath);
+      for (const pkg of packages) {
+        const pkgPath = path.join(wingetPackagesPath, pkg);
+        if (fs.statSync(pkgPath).isDirectory()) {
+          // Check if this package dir has exe files and is not already in PATH
+          const files = fs.readdirSync(pkgPath);
+          const hasExe = files.some(f => f.endsWith('.exe'));
+          if (hasExe && !currentPath.toLowerCase().includes(pkgPath.toLowerCase())) {
+            pathsToAdd.push(pkgPath);
+            packagesAdded.push(pkg.split('_')[0]); // Get package name before underscore
+          }
+        }
+      }
+    }
+
+    // Add all paths at once
+    if (pathsToAdd.length > 0) {
+      const newPath = currentPath ? `${currentPath};${pathsToAdd.join(';')}` : pathsToAdd.join(';');
+      execSync(`powershell -Command "[Environment]::SetEnvironmentVariable('Path', '${newPath.replace(/'/g, "''")}', 'User')"`, {
+        encoding: 'utf-8'
+      });
+
+      // Also update current process PATH
+      process.env.PATH = `${process.env.PATH};${pathsToAdd.join(';')}`;
+    }
+
+    return { linksAdded, packagesAdded };
+  } catch {
+    return { linksAdded: false, packagesAdded: [] };
+  }
+}
 
 export async function installCommand(configPath: string): Promise<void> {
   const winget = new WingetService();
@@ -124,4 +257,31 @@ export async function installCommand(configPath: string): Promise<void> {
     chalk.green(`Success: ${successful} | `) +
     chalk.yellow(`Skipped: ${skipped} | `) +
     chalk.red(`Failed: ${failed}\n`));
+
+  // Ensure WinGet paths are configured
+  if (successful > 0) {
+    // Create aliases for exe files with complex names
+    const aliases = createExeAliases();
+    if (aliases.length > 0) {
+      console.log(chalk.cyan('📌 Created command aliases:'));
+      for (const alias of aliases) {
+        console.log(chalk.gray(`   - ${alias}`));
+      }
+    }
+
+    const { linksAdded, packagesAdded } = ensureWingetPathsConfigured();
+    if (linksAdded || packagesAdded.length > 0) {
+      console.log(chalk.cyan('📌 PATH updated for installed applications:'));
+      if (linksAdded) {
+        console.log(chalk.gray('   - WinGet Links'));
+      }
+      for (const pkg of packagesAdded) {
+        console.log(chalk.gray(`   - ${pkg}`));
+      }
+    }
+
+    if (aliases.length > 0 || linksAdded || packagesAdded.length > 0) {
+      console.log(chalk.yellow('\n⚠️  Restart your terminal to use installed commands.\n'));
+    }
+  }
 }
