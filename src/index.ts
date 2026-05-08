@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import { showCommand } from './commands/show';
 import { installCommand } from './commands/install';
 import { exportCommand } from './commands/export';
+import { createCommand } from './commands/create';
 
 const program = new Command();
 
@@ -20,12 +21,22 @@ program
   });
 
 program
+  .command('create')
+  .description('Create a new configuration file interactively')
+  .argument('<fileName>', 'Name of the configuration file to create')
+  .action(async (fileName: string) => {
+    await createCommand(fileName);
+  });
+
+
+program
   .command('install')
   .description('Install applications from config file')
-  .argument('<path>', 'Path to config.json file')
+  .argument('[path]', 'Path to config.json file (optional if using presets)')
   .action(async (configPath: string) => {
     await installCommand(configPath);
   });
+
 
 program
   .command('export')
