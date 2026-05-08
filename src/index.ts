@@ -11,7 +11,11 @@ const program = new Command();
 program
   .name('setup')
   .description('CLI tool for managing Windows applications via winget')
-  .version('1.0.0');
+  .version('1.0.0')
+  .action(async () => {
+    // Root command with no arguments - run interactive create mode
+    await createCommand();
+  });
 
 program
   .command('show')
@@ -21,22 +25,12 @@ program
   });
 
 program
-  .command('create')
-  .description('Create a new configuration file interactively')
-  .argument('<fileName>', 'Name of the configuration file to create')
-  .action(async (fileName: string) => {
-    await createCommand(fileName);
-  });
-
-
-program
   .command('install')
   .description('Install applications from config file')
   .argument('[path]', 'Path to config.json file (optional if using presets)')
   .action(async (configPath: string) => {
     await installCommand(configPath);
   });
-
 
 program
   .command('export')

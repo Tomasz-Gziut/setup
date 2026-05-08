@@ -21,7 +21,7 @@ type PendingAction = {
   run: () => Promise<void> | void;
 };
 
-export async function createCommand(fileName: string): Promise<void> {
+export async function createCommand(): Promise<void> {
   const winget = new WingetService();
   const selectedApps: AppConfig[] = [];
   let installedApps: InstalledApp[] = [];
@@ -40,13 +40,14 @@ export async function createCommand(fileName: string): Promise<void> {
   let filterText = '';
   let showInstalledOnly = false;
   let pendingAction: PendingAction | undefined;
+  let fileNameInput = '';
+  let isEnteringFileName = false;
 
-  const configPath = fileName.endsWith('.json') ? fileName : `${fileName}.json`;
-  const fullPath = path.join(PRESET_DIR, configPath);
-
-  if (!fs.existsSync(PRESET_DIR)) {
-    fs.mkdirSync(PRESET_DIR, { recursive: true });
-  }
+  const ensurePresetDir = () => {
+    if (!fs.existsSync(PRESET_DIR)) {
+      fs.mkdirSync(PRESET_DIR, { recursive: true });
+    }
+  };
 
   const normalizeAppName = (name: string): string =>
     name
@@ -82,7 +83,7 @@ export async function createCommand(fileName: string): Promise<void> {
     installedNameEntries = nextInstalledNameEntries;
   };
 
-  console.log(chalk.cyan(`\nCreating config: ${chalk.bold(fullPath)}`));
+  console.log(chalk.cyan(`\nSetup - Application Manager`));
 
   process.stdout.write(chalk.gray('Loading installed applications... '));
   installedApps = winget.getInstalledApps().filter(app => !winget.isSystemApp(app));
@@ -205,8 +206,14 @@ export async function createCommand(fileName: string): Promise<void> {
 
   const render = () => {
     clearScreen();
-    console.log(chalk.cyan.bold(`Creating config: ${configPath}`));
+    console.log(chalk.cyan.bold(`Setup - Application Manager`));
     console.log();
+    if (isEnteringFileName) {
+      console.log(chalk.yellow.bold(`Save preset as: ${fileNameInput}_`));
+      console.log(chalk.gray(`Will be saved to: ${PRESET_DIR}/${fileNameInput || '<filename>'}.json`));
+      console.log(chalk.gray('Enter = save, Esc = cancel'));
+      console.log();
+    }
     const filterLabel = filterText ? `Filter: ${filterText}_ (${filteredApps.length} results)` : 'Filter: _';
     const installedFilterLabel = showInstalledOnly ? chalk.magenta(' [Installed only]') : '';
     console.log(chalk.yellow.bold(filterLabel) + installedFilterLabel);
@@ -303,11 +310,16 @@ export async function createCommand(fileName: string): Promise<void> {
     }
   };
 
-  const save = () => {
-    if (selectedApps.length === 0) return false;
+  const save = (fileName: string): { success: boolean; path?: string; error?: string } => {
+    if (selectedApps.length === 0) return { success: false, error: 'No applications selected' };
+    if (!fileName.trim()) return { success: false, error: 'File name cannot be empty' };
+
+    ensurePresetDir();
+    const configPath = fileName.endsWith('.json') ? fileName : `${fileName}.json`;
+    const fullPath = path.join(PRESET_DIR, configPath);
     const config: Config = { apps: selectedApps };
     fs.writeFileSync(fullPath, JSON.stringify(config, null, 2));
-    return true;
+    return { success: true, path: fullPath };
   };
 
   readline.emitKeypressEvents(process.stdin);
@@ -321,14 +333,19 @@ export async function createCommand(fileName: string): Promise<void> {
       process.stdin.removeAllListeners('keypress');
       clearScreen();
     };
-    const saveAndExit = () => {
-      if (save()) {
-        cleanup();
-        console.log(chalk.green(`Saved ${selectedApps.length} apps to ${fullPath}`));
-        resolve();
+    const doSave = (fileName: string) => {
+      const result = save(fileName);
+      if (result.success) {
+        clearScreen();
+        console.log(chalk.green(`\nSaved ${selectedApps.length} apps to ${result.path}\n`));
+        setTimeout(() => {
+          isEnteringFileName = false;
+          fileNameInput = '';
+          render();
+        }, 1500);
       } else {
         clearScreen();
-        console.log(chalk.red.bold('\n  No applications selected!\n'));
+        console.log(chalk.red.bold(`\n  ${result.error}!\n`));
         setTimeout(() => render(), 1000);
       }
     };
@@ -338,6 +355,39 @@ export async function createCommand(fileName: string): Promise<void> {
         cleanup();
         console.log(chalk.yellow('Cancelled.'));
         process.exit(0);
+      }
+      // Handle file name input mode
+      if (isEnteringFileName) {
+        if (key.name === 'escape') {
+          isEnteringFileName = false;
+          fileNameInput = '';
+          render();
+          return;
+        }
+        if (key.name === 'return') {
+          if (fileNameInput.trim()) {
+            doSave(fileNameInput.trim());
+          } else {
+            isEnteringFileName = false;
+            render();
+          }
+          return;
+        }
+        if (key.name === 'backspace') {
+          fileNameInput = fileNameInput.slice(0, -1);
+          render();
+          return;
+        }
+        if (!key.ctrl && !key.meta && key.sequence && key.sequence.length === 1 && key.sequence.charCodeAt(0) >= 32) {
+          // Allow alphanumeric, dash, underscore for filename
+          const char = key.sequence;
+          if (/^[a-zA-Z0-9_\-]$/.test(char)) {
+            fileNameInput += char;
+            render();
+          }
+          return;
+        }
+        return;
       }
       if (pendingAction) {
         if (key.name === 'return') {
@@ -352,7 +402,15 @@ export async function createCommand(fileName: string): Promise<void> {
         return;
       }
       if (key.ctrl && key.name === 's') {
-        saveAndExit();
+        if (selectedApps.length === 0) {
+          clearScreen();
+          console.log(chalk.red.bold('\n  No applications selected!\n'));
+          setTimeout(() => render(), 1000);
+          return;
+        }
+        isEnteringFileName = true;
+        fileNameInput = '';
+        render();
         return;
       }
       if (key.ctrl && key.name === 'q') {
@@ -373,6 +431,8 @@ export async function createCommand(fileName: string): Promise<void> {
               applyLocalFilter();
             };
 
+            let successCount = 0;
+            let failCount = 0;
             for (const app of selectedApps) {
               clearScreen();
               console.log(chalk.cyan(`Installing ${app.name}...`));
@@ -380,13 +440,23 @@ export async function createCommand(fileName: string): Promise<void> {
                 // Callback when app is installed - refresh list immediately
                 refreshList();
               });
-              if (!result.success) {
+              if (result.success) {
+                successCount++;
+              } else {
+                failCount++;
                 console.log(chalk.red(`Failed to install ${app.name}: ${result.message}`));
                 await new Promise(resolve => setTimeout(resolve, 1500));
               }
             }
-            // Final refresh
+            // Final refresh and show summary
             refreshList();
+            clearScreen();
+            if (failCount === 0) {
+              console.log(chalk.green(`\nSuccessfully installed ${successCount} app(s).\n`));
+            } else {
+              console.log(chalk.yellow(`\nInstallation complete: ${successCount} succeeded, ${failCount} failed.\n`));
+            }
+            await new Promise(resolve => setTimeout(resolve, 1500));
             render();
           }
         };
@@ -413,6 +483,8 @@ export async function createCommand(fileName: string): Promise<void> {
               applyLocalFilter();
             };
 
+            let successCount = 0;
+            let failCount = 0;
             for (const app of installedSelected) {
               clearScreen();
               console.log(chalk.cyan(`Uninstalling ${app.name}...`));
@@ -420,13 +492,23 @@ export async function createCommand(fileName: string): Promise<void> {
                 // Callback when app is uninstalled - refresh list immediately
                 refreshList();
               });
-              if (!result.success) {
+              if (result.success) {
+                successCount++;
+              } else {
+                failCount++;
                 console.log(chalk.red(`Failed to uninstall ${app.name}: ${result.message}`));
                 await new Promise(resolve => setTimeout(resolve, 1500));
               }
             }
-            // Final refresh
+            // Final refresh and show summary
             refreshList();
+            clearScreen();
+            if (failCount === 0) {
+              console.log(chalk.green(`\nSuccessfully uninstalled ${successCount} app(s).\n`));
+            } else {
+              console.log(chalk.yellow(`\nUninstallation complete: ${successCount} succeeded, ${failCount} failed.\n`));
+            }
+            await new Promise(resolve => setTimeout(resolve, 1500));
             render();
           }
         };
