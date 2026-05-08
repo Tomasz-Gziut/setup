@@ -227,7 +227,7 @@ export async function createCommand(fileName: string): Promise<void> {
     console.log(`  ${chalk.yellow('Type')}    Filter         ${chalk.yellow('Backspace')} Delete char   ${chalk.yellow('Tab')} Toggle installed filter`);
     console.log(`  ${chalk.yellow('Left/Right')} Change table   ${chalk.yellow('Up/Down')} Navigate`);
     console.log(`  ${chalk.yellow('Enter')}   Select/Remove  ${chalk.yellow('Ctrl+S')} Save   ${chalk.yellow('Ctrl+Q')} Quit`);
-    console.log(`  ${chalk.yellow('Ctrl+I')} Install selected   ${chalk.yellow('Ctrl+U')} Uninstall selected`);
+    console.log(`  ${chalk.yellow('F5')} Install selected   ${chalk.yellow('F6')} Uninstall selected`);
   };
 
   const getLocalMatches = (q: string): InstalledApp[] => allApps.filter(app => app.name.toLowerCase().includes(q) || app.id.toLowerCase().includes(q));
@@ -361,33 +361,39 @@ export async function createCommand(fileName: string): Promise<void> {
         resolve();
         return;
       }
-      if (key.ctrl && key.name === 'i') {
+      if (key.name === 'f5') {
         if (selectedApps.length === 0) { render(); return; }
         const appsToInstall = selectedApps.map(a => a.name).join(', ');
         pendingAction = {
           message: `Install/reinstall ${selectedApps.length} app(s)? (${appsToInstall})`,
           run: async () => {
+            const refreshList = () => {
+              installedApps = winget.getInstalledApps().filter(app => !winget.isSystemApp(app));
+              rebuildInstalledIndexes();
+              applyLocalFilter();
+            };
+
             for (const app of selectedApps) {
               clearScreen();
               console.log(chalk.cyan(`Installing ${app.name}...`));
-              const result = await winget.installApp(app.id);
+              const result = await winget.installApp(app.id, () => {
+                // Callback when app is installed - refresh list immediately
+                refreshList();
+              });
               if (!result.success) {
                 console.log(chalk.red(`Failed to install ${app.name}: ${result.message}`));
                 await new Promise(resolve => setTimeout(resolve, 1500));
               }
             }
-            clearScreen();
-            console.log(chalk.gray('Refreshing installed applications list...'));
-            installedApps = winget.getInstalledApps().filter(app => !winget.isSystemApp(app));
-            rebuildInstalledIndexes();
-            applyLocalFilter();
+            // Final refresh
+            refreshList();
             render();
           }
         };
         render();
         return;
       }
-      if (key.ctrl && key.name === 'u') {
+      if (key.name === 'f6') {
         if (selectedApps.length === 0) { render(); return; }
         const installedSelected = selectedApps.filter(app => findInstalledMatch({ id: app.id, name: app.name, version: app.version, source: '' }) !== undefined);
         if (installedSelected.length === 0) {
@@ -401,20 +407,26 @@ export async function createCommand(fileName: string): Promise<void> {
         pendingAction = {
           message: `Uninstall ${installedSelected.length} app(s)? (${appsToUninstall})`,
           run: async () => {
+            const refreshList = () => {
+              installedApps = winget.getInstalledApps().filter(app => !winget.isSystemApp(app));
+              rebuildInstalledIndexes();
+              applyLocalFilter();
+            };
+
             for (const app of installedSelected) {
               clearScreen();
               console.log(chalk.cyan(`Uninstalling ${app.name}...`));
-              const result = await winget.uninstallApp(app.id);
+              const result = await winget.uninstallApp(app.id, () => {
+                // Callback when app is uninstalled - refresh list immediately
+                refreshList();
+              });
               if (!result.success) {
                 console.log(chalk.red(`Failed to uninstall ${app.name}: ${result.message}`));
                 await new Promise(resolve => setTimeout(resolve, 1500));
               }
             }
-            clearScreen();
-            console.log(chalk.gray('Refreshing installed applications list...'));
-            installedApps = winget.getInstalledApps().filter(app => !winget.isSystemApp(app));
-            rebuildInstalledIndexes();
-            applyLocalFilter();
+            // Final refresh
+            refreshList();
             render();
           }
         };
