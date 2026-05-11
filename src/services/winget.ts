@@ -105,74 +105,177 @@ export class WingetService {
     }
   }
 
-  async installApp(id: string): Promise<{ success: boolean; message: string }> {
+  async installApp(id: string, onInstalled?: () => void): Promise<{ success: boolean; message: string; requiresManualAction?: boolean }> {
+    const wasInstalledBefore = this.isAppInstalled(id);
+
     return new Promise((resolve) => {
-      const process = spawn('winget', ['install', '--id', id, '--silent', '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity'], {
+      const proc = spawn('winget', ['install', '--id', id, '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity', '--force'], {
         shell: true,
         stdio: ['ignore', 'pipe', 'pipe']
       });
 
       let output = '';
       let errorOutput = '';
+      let lastActivityTime = Date.now();
+      let resolved = false;
+      let manualActionNotified = false;
+      let alreadyNotifiedInstalled = false;
+      const INACTIVITY_TIMEOUT = 10000; // 10 seconds without output = likely waiting for user
+      const POLL_INTERVAL = 3000; // Check every 3 seconds if app is installed
 
-      process.stdout?.on('data', (data) => {
+      // Poll to check if app was installed while waiting
+      const pollInstalled = setInterval(() => {
+        if (resolved || alreadyNotifiedInstalled) return;
+        const isNowInstalled = this.isAppInstalled(id);
+        if (isNowInstalled && !wasInstalledBefore) {
+          alreadyNotifiedInstalled = true;
+          console.log(`  [OK] App installed successfully`);
+          if (onInstalled) onInstalled();
+        }
+      }, POLL_INTERVAL);
+
+      const checkInactivity = setInterval(() => {
+        if (resolved) {
+          clearInterval(checkInactivity);
+          return;
+        }
+        const inactiveTime = Date.now() - lastActivityTime;
+        if (inactiveTime > INACTIVITY_TIMEOUT && !manualActionNotified) {
+          manualActionNotified = true;
+          console.log(`  [!] Installer requires manual interaction - please complete the installation manually`);
+          console.log(`  [!] Waiting for installation to complete...`);
+        }
+      }, 5000);
+
+      proc.stdout?.on('data', (data) => {
+        lastActivityTime = Date.now();
         output += data.toString();
         const text = data.toString().trim();
         if (text) console.log(`  ${text}`);
       });
 
-      process.stderr?.on('data', (data) => {
+      proc.stderr?.on('data', (data) => {
+        lastActivityTime = Date.now();
         errorOutput += data.toString();
       });
 
-      process.on('close', (code) => {
-        if (code === 0) {
+      proc.on('close', (code) => {
+        clearInterval(checkInactivity);
+        clearInterval(pollInstalled);
+        if (resolved) return;
+        resolved = true;
+
+        // Verify app is actually installed
+        const isInstalled = this.isAppInstalled(id);
+
+        if (code === 0 && isInstalled) {
+          if (!alreadyNotifiedInstalled && onInstalled) onInstalled();
           resolve({ success: true, message: 'Installed successfully' });
-        } else if (output.includes('already installed')) {
+        } else if (output.includes('already installed') || (wasInstalledBefore && isInstalled)) {
           resolve({ success: true, message: 'Already installed' });
+        } else if (isInstalled) {
+          if (!alreadyNotifiedInstalled && onInstalled) onInstalled();
+          resolve({ success: true, message: 'Installed successfully (manual)' });
         } else {
           resolve({ success: false, message: errorOutput || output || 'Installation failed' });
         }
       });
 
-      process.on('error', (error) => {
+      proc.on('error', (error) => {
+        clearInterval(checkInactivity);
+        clearInterval(pollInstalled);
+        if (resolved) return;
+        resolved = true;
         resolve({ success: false, message: error.message });
       });
     });
   }
 
-  async uninstallApp(id: string): Promise<{ success: boolean; message: string }> {
+  async uninstallApp(id: string, onUninstalled?: () => void): Promise<{ success: boolean; message: string; requiresManualAction?: boolean }> {
     return new Promise((resolve) => {
-      const process = spawn('winget', ['uninstall', '--id', id, '--silent', '--disable-interactivity'], {
+      const proc = spawn('winget', ['uninstall', '--id', id, '--disable-interactivity', '--force', '--purge'], {
         shell: true,
         stdio: ['ignore', 'pipe', 'pipe']
       });
 
       let output = '';
       let errorOutput = '';
+      let lastActivityTime = Date.now();
+      let resolved = false;
+      let manualActionNotified = false;
+      let alreadyNotifiedUninstalled = false;
+      const INACTIVITY_TIMEOUT = 10000; // 10 seconds without output = likely waiting for user
+      const POLL_INTERVAL = 3000; // Check every 3 seconds if app is uninstalled
 
-      process.stdout?.on('data', (data) => {
+      // Poll to check if app was uninstalled while waiting
+      const pollUninstalled = setInterval(() => {
+        if (resolved || alreadyNotifiedUninstalled) return;
+        const stillInstalled = this.isAppInstalled(id);
+        if (!stillInstalled) {
+          alreadyNotifiedUninstalled = true;
+          console.log(`  [OK] App uninstalled successfully`);
+          if (onUninstalled) onUninstalled();
+        }
+      }, POLL_INTERVAL);
+
+      const checkInactivity = setInterval(() => {
+        if (resolved) {
+          clearInterval(checkInactivity);
+          return;
+        }
+        const inactiveTime = Date.now() - lastActivityTime;
+        if (inactiveTime > INACTIVITY_TIMEOUT && !manualActionNotified) {
+          manualActionNotified = true;
+          console.log(`  [!] Uninstaller requires manual interaction - please complete the uninstallation manually`);
+          console.log(`  [!] Waiting for uninstallation to complete...`);
+        }
+      }, 5000);
+
+      proc.stdout?.on('data', (data) => {
+        lastActivityTime = Date.now();
         output += data.toString();
         const text = data.toString().trim();
         if (text) console.log(`  ${text}`);
       });
 
-      process.stderr?.on('data', (data) => {
+      proc.stderr?.on('data', (data) => {
+        lastActivityTime = Date.now();
         errorOutput += data.toString();
       });
 
-      process.on('close', (code) => {
-        if (code === 0) {
+      proc.on('close', (code) => {
+        clearInterval(checkInactivity);
+        clearInterval(pollUninstalled);
+        if (resolved) return;
+        resolved = true;
+
+        // Verify app is actually uninstalled
+        const stillInstalled = this.isAppInstalled(id);
+
+        if (code === 0 && !stillInstalled) {
+          if (!alreadyNotifiedUninstalled && onUninstalled) onUninstalled();
           resolve({ success: true, message: 'Uninstalled successfully' });
+        } else if (!stillInstalled) {
+          if (!alreadyNotifiedUninstalled && onUninstalled) onUninstalled();
+          resolve({ success: true, message: 'Uninstalled successfully (manual)' });
         } else {
-          resolve({ success: false, message: errorOutput || output || 'Uninstall failed' });
+          resolve({ success: false, message: errorOutput || output || 'Uninstall failed - app still installed' });
         }
       });
 
-      process.on('error', (error) => {
+      proc.on('error', (error) => {
+        clearInterval(checkInactivity);
+        clearInterval(pollUninstalled);
+        if (resolved) return;
+        resolved = true;
         resolve({ success: false, message: error.message });
       });
     });
+  }
+
+  isAppInstalled(id: string): boolean {
+    const installedApps = this.getInstalledApps();
+    return installedApps.some(app => app.id.toLowerCase() === id.toLowerCase());
   }
 
   async searchApp(query: string): Promise<InstalledApp[]> {
