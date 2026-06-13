@@ -95,5 +95,13 @@ pub fn run(output_path: &str) -> Result<()> {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max { s.to_string() } else { format!("{}…", &s[..max.saturating_sub(1)]) }
+    if s.chars().count() <= max {
+        s.to_string()
+    } else if max == 0 {
+        String::new()
+    } else {
+        let mut out = s.chars().take(max.saturating_sub(1)).collect::<String>();
+        out.push('…');
+        out
+    }
 }

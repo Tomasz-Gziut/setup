@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use regex::Regex;
@@ -100,13 +101,17 @@ impl WingetService {
     }
 
     fn run(&self, args: &[&str]) -> String {
+        self.run_with_status(args).0
+    }
+
+    fn run_with_status(&self, args: &[&str]) -> (String, Option<i32>) {
         let mut cmd = Command::new("winget");
         cmd.args(args);
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
         match cmd.output() {
-            Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
-            Err(_) => String::new(),
+            Ok(out) => (command_text(out.stdout, out.stderr), out.status.code()),
+            Err(e) => (e.to_string(), None),
         }
     }
 
@@ -116,7 +121,7 @@ impl WingetService {
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
         match cmd.output() {
-            Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+            Ok(out) => command_text(out.stdout, out.stderr),
             Err(_) => String::new(),
         }
     }
@@ -132,11 +137,17 @@ impl WingetService {
     }
 
     pub fn is_available_in_winget(&self, id: &str) -> bool {
+        if self.is_available_in_index(id) {
+            return true;
+        }
+
         let out = self.run(&[
             "search",
             "--id",
             id,
             "--exact",
+            "--source",
+            "winget",
             "--accept-source-agreements",
             "--disable-interactivity",
         ]);
@@ -151,16 +162,104 @@ impl WingetService {
 
     pub fn search_app(&self, query: &str) -> Vec<InstalledApp> {
         let query = query.trim();
-        let mut args = vec!["search".to_string()];
-        if !query.is_empty() {
-            args.push("--query".to_string());
-            args.push(query.to_string());
+        if query.is_empty() {
+            return self.get_catalog_apps();
         }
+
+        if let Ok(apps) = self.search_catalog_index(query, 100) {
+            return apps;
+        }
+
+        let mut args = vec!["search".to_string()];
+        args.push("--query".to_string());
+        args.push(query.to_string());
+        args.push("--source".to_string());
+        args.push("winget".to_string());
         args.push("--accept-source-agreements".to_string());
         args.push("--disable-interactivity".to_string());
 
         let out = self.run_str(&args);
         self.parse_table(&out)
+    }
+
+    pub fn get_catalog_apps(&self) -> Vec<InstalledApp> {
+        self.get_catalog_apps_with_error().0
+    }
+
+    pub fn get_catalog_apps_with_error(&self) -> (Vec<InstalledApp>, Option<String>) {
+        match self.read_catalog_index(None, None) {
+            Ok(apps) if !apps.is_empty() => return (apps, None),
+            Ok(_) => {}
+            Err(_) => {}
+        }
+
+        let attempts = [vec![
+            "search",
+            ".",
+            "--source",
+            "winget",
+            "--accept-source-agreements",
+            "--disable-interactivity",
+        ]];
+
+        let mut last_error = None;
+        for args in attempts {
+            let (out, code) = self.run_with_status(&args);
+            let apps = self.parse_table(&out);
+            if !apps.is_empty() {
+                return (apps, None);
+            }
+
+            let command = format!("winget {}", args.join(" "));
+            last_error = Some(match code {
+                Some(0) => format!("{command} returned no packages"),
+                Some(c) => format!("{command} failed with exit code {c}"),
+                None => format!("{command} could not be started: {out}"),
+            });
+            if !out.trim().is_empty() {
+                last_error = Some(format!(
+                    "{}: {}",
+                    last_error.unwrap(),
+                    out.lines().next().unwrap_or_default()
+                ));
+            }
+        }
+
+        (vec![], last_error)
+    }
+
+    fn search_catalog_index(&self, query: &str, limit: usize) -> Result<Vec<InstalledApp>, String> {
+        self.read_catalog_index(Some(query), Some(limit))
+    }
+
+    fn is_available_in_index(&self, id: &str) -> bool {
+        let Ok(apps) = self.read_catalog_index(Some(id), Some(1)) else {
+            return false;
+        };
+        apps.iter().any(|app| app.id.eq_ignore_ascii_case(id))
+    }
+
+    fn read_catalog_index(
+        &self,
+        query: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<InstalledApp>, String> {
+        let index_path = find_winget_source_index()
+            .ok_or_else(|| "Winget source index was not found".to_string())?;
+        let mut apps = read_winget_packages_from_sqlite(&index_path)?;
+        if let Some(query) = query {
+            let q = query.to_lowercase();
+            apps.retain(|app| {
+                app.name.to_lowercase().contains(&q)
+                    || app.id.to_lowercase().contains(&q)
+                    || app.source.to_lowercase().contains(&q)
+            });
+            if let Some(limit) = limit {
+                apps.truncate(limit);
+            }
+        }
+
+        Ok(apps)
     }
 
     pub fn install_app(&self, id: &str, mut on_line: impl FnMut(&str)) -> InstallResult {
@@ -183,7 +282,12 @@ impl WingetService {
         cmd.creation_flags(CREATE_NO_WINDOW);
 
         let child = match cmd.spawn() {
-            Err(e) => return InstallResult { success: false, message: e.to_string() },
+            Err(e) => {
+                return InstallResult {
+                    success: false,
+                    message: e.to_string(),
+                }
+            }
             Ok(c) => c,
         };
 
@@ -201,12 +305,25 @@ impl WingetService {
 
         if is_installed {
             if was_installed && full_output.contains("already installed") {
-                InstallResult { success: true, message: "Already installed".into() }
+                InstallResult {
+                    success: true,
+                    message: "Already installed".into(),
+                }
             } else {
-                InstallResult { success: true, message: "Installed successfully".into() }
+                InstallResult {
+                    success: true,
+                    message: "Installed successfully".into(),
+                }
             }
         } else {
-            InstallResult { success: false, message: full_output.lines().last().unwrap_or("Installation failed").to_string() }
+            InstallResult {
+                success: false,
+                message: full_output
+                    .lines()
+                    .last()
+                    .unwrap_or("Installation failed")
+                    .to_string(),
+            }
         }
     }
 
@@ -221,13 +338,18 @@ impl WingetService {
             "--force",
             "--purge",
         ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
 
         let child = match cmd.spawn() {
-            Err(e) => return InstallResult { success: false, message: e.to_string() },
+            Err(e) => {
+                return InstallResult {
+                    success: false,
+                    message: e.to_string(),
+                }
+            }
             Ok(c) => c,
         };
 
@@ -239,22 +361,34 @@ impl WingetService {
         }
 
         if self.is_app_installed(id) {
-            InstallResult { success: false, message: "Uninstall failed – app still installed".into() }
+            InstallResult {
+                success: false,
+                message: "Uninstall failed – app still installed".into(),
+            }
         } else {
-            InstallResult { success: true, message: "Uninstalled successfully".into() }
+            InstallResult {
+                success: true,
+                message: "Uninstalled successfully".into(),
+            }
         }
     }
 
     pub fn parse_table(&self, raw: &str) -> Vec<InstalledApp> {
         let raw = raw.trim_start_matches('\u{feff}');
+        let ansi = Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").ok();
 
         let lines: Vec<String> = raw
             .split('\n')
             .map(|l| {
-                if l.contains('\r') {
+                let l = if l.contains('\r') {
                     l.split('\r').last().unwrap_or(l).to_string()
                 } else {
                     l.to_string()
+                };
+                if let Some(ansi) = &ansi {
+                    ansi.replace_all(&l, "").into_owned()
+                } else {
+                    l
                 }
             })
             .filter(|l| !l.trim().is_empty())
@@ -283,7 +417,7 @@ impl WingetService {
         }
 
         if col_starts.len() < 2 {
-            return vec![];
+            return parse_table_by_spacing(&lines, sep_idx);
         }
 
         let mut apps = vec![];
@@ -316,11 +450,20 @@ impl WingetService {
             let source = col(col_starts[last], ll);
 
             if !name.is_empty() && !id.is_empty() {
-                apps.push(InstalledApp { name, id, version, source });
+                apps.push(InstalledApp {
+                    name,
+                    id,
+                    version,
+                    source,
+                });
             }
         }
 
-        apps
+        if apps.is_empty() {
+            parse_table_by_spacing(&lines, sep_idx)
+        } else {
+            apps
+        }
     }
 
     fn get_installed_apps_from_registry(&self) -> Vec<InstalledApp> {
@@ -355,6 +498,285 @@ impl WingetService {
         apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         apps
     }
+}
+
+fn command_text(stdout: Vec<u8>, stderr: Vec<u8>) -> String {
+    let mut text = String::from_utf8_lossy(&stdout).into_owned();
+    if !stderr.is_empty() {
+        if !text.ends_with('\n') && !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&String::from_utf8_lossy(&stderr));
+    }
+    text
+}
+
+fn find_winget_source_index() -> Option<PathBuf> {
+    let from_appx = winget_source_index_from_appx_package();
+    if from_appx.is_some() {
+        return from_appx;
+    }
+
+    winget_source_index_from_windows_apps()
+}
+
+fn winget_source_index_from_appx_package() -> Option<PathBuf> {
+    let mut cmd = Command::new("powershell");
+    cmd.args([
+            "-NoProfile",
+            "-Command",
+            "Get-AppxPackage Microsoft.Winget.Source | Sort-Object Version -Descending | Select-Object -First 1 -ExpandProperty InstallLocation",
+        ]);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = cmd.output().ok()?;
+
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        return None;
+    }
+
+    let index = PathBuf::from(path).join("Public").join("index.db");
+    index.exists().then_some(index)
+}
+
+fn winget_source_index_from_windows_apps() -> Option<PathBuf> {
+    let root = Path::new(r"C:\Program Files\WindowsApps");
+    let entries = std::fs::read_dir(root).ok()?;
+    let mut matches: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.starts_with("Microsoft.Winget.Source_"))
+        })
+        .map(|path| path.join("Public").join("index.db"))
+        .filter(|path| path.exists())
+        .collect();
+
+    matches.sort();
+    matches.pop()
+}
+
+fn read_winget_packages_from_sqlite(path: &Path) -> Result<Vec<InstalledApp>, String> {
+    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    if data.len() < 100 || &data[..16] != b"SQLite format 3\0" {
+        return Err("Invalid SQLite index header".into());
+    }
+
+    let page_size = match read_u16(&data, 16)? {
+        1 => 65_536,
+        n => n as usize,
+    };
+
+    let mut rows = Vec::new();
+    read_sqlite_table_page(&data, page_size, 3, &mut rows)?;
+    rows.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.id.to_lowercase().cmp(&b.id.to_lowercase()))
+    });
+    Ok(rows)
+}
+
+fn read_sqlite_table_page(
+    data: &[u8],
+    page_size: usize,
+    page_no: u32,
+    rows: &mut Vec<InstalledApp>,
+) -> Result<(), String> {
+    let page_start = (page_no as usize)
+        .checked_sub(1)
+        .and_then(|n| n.checked_mul(page_size))
+        .ok_or_else(|| "Invalid SQLite page number".to_string())?;
+    let header_start = if page_no == 1 {
+        page_start + 100
+    } else {
+        page_start
+    };
+    if header_start >= data.len() {
+        return Err("SQLite page outside file".into());
+    }
+
+    let page_type = data[header_start];
+    let cell_count = read_u16(data, header_start + 3)? as usize;
+    let cell_ptr_start = header_start + if page_type == 0x05 { 12 } else { 8 };
+
+    match page_type {
+        0x05 => {
+            for i in 0..cell_count {
+                let ptr = read_u16(data, cell_ptr_start + (i * 2))? as usize;
+                let cell = page_start + ptr;
+                let child = read_u32(data, cell)?;
+                read_sqlite_table_page(data, page_size, child, rows)?;
+            }
+            let right_child = read_u32(data, header_start + 8)?;
+            read_sqlite_table_page(data, page_size, right_child, rows)
+        }
+        0x0d => {
+            for i in 0..cell_count {
+                let ptr = read_u16(data, cell_ptr_start + (i * 2))? as usize;
+                let cell = page_start + ptr;
+                if let Some(app) = parse_sqlite_package_cell(data, cell)? {
+                    rows.push(app);
+                }
+            }
+            Ok(())
+        }
+        _ => Err(format!("Unsupported SQLite page type {page_type:#x}")),
+    }
+}
+
+fn parse_sqlite_package_cell(data: &[u8], offset: usize) -> Result<Option<InstalledApp>, String> {
+    let (payload_len, n1) = read_varint(data, offset)?;
+    let (_, n2) = read_varint(data, offset + n1)?;
+    let payload_start = offset + n1 + n2;
+    let payload_end = payload_start
+        .checked_add(payload_len as usize)
+        .ok_or_else(|| "Invalid SQLite payload length".to_string())?;
+    if payload_end > data.len() {
+        return Err("SQLite payload outside file".into());
+    }
+
+    let payload = &data[payload_start..payload_end];
+    let (header_len, h_used) = read_varint(payload, 0)?;
+    let header_len = header_len as usize;
+    if header_len > payload.len() || h_used > header_len {
+        return Err("Invalid SQLite record header".into());
+    }
+
+    let mut serials = Vec::new();
+    let mut pos = h_used;
+    while pos < header_len {
+        let (serial, used) = read_varint(payload, pos)?;
+        serials.push(serial);
+        pos += used;
+    }
+
+    let mut values = Vec::new();
+    let mut body_pos = header_len;
+    for serial in serials {
+        let len = sqlite_serial_len(serial)?;
+        let end = body_pos
+            .checked_add(len)
+            .ok_or_else(|| "Invalid SQLite field length".to_string())?;
+        if end > payload.len() {
+            return Err("SQLite field outside payload".into());
+        }
+        values.push(sqlite_serial_text(serial, &payload[body_pos..end])?);
+        body_pos = end;
+    }
+
+    let id = values.get(1).and_then(|v| v.clone()).unwrap_or_default();
+    let name = values.get(2).and_then(|v| v.clone()).unwrap_or_default();
+    let version = values.get(4).and_then(|v| v.clone()).unwrap_or_default();
+    if id.is_empty() || name.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(InstalledApp {
+        name,
+        id,
+        version,
+        source: "winget".into(),
+    }))
+}
+
+fn sqlite_serial_len(serial: u64) -> Result<usize, String> {
+    match serial {
+        0 | 8 | 9 => Ok(0),
+        1 => Ok(1),
+        2 => Ok(2),
+        3 => Ok(3),
+        4 => Ok(4),
+        5 => Ok(6),
+        6 | 7 => Ok(8),
+        n if n >= 12 => Ok(((n - 12) / 2) as usize),
+        _ => Err(format!("Unsupported SQLite serial type {serial}")),
+    }
+}
+
+fn sqlite_serial_text(serial: u64, bytes: &[u8]) -> Result<Option<String>, String> {
+    if serial == 0 {
+        return Ok(None);
+    }
+    if serial >= 13 && serial % 2 == 1 {
+        return Ok(Some(String::from_utf8_lossy(bytes).into_owned()));
+    }
+    Ok(Some(String::new()))
+}
+
+fn read_varint(data: &[u8], offset: usize) -> Result<(u64, usize), String> {
+    let mut value = 0u64;
+    for i in 0..9 {
+        let byte = *data
+            .get(offset + i)
+            .ok_or_else(|| "Unexpected end of varint".to_string())?;
+        if i == 8 {
+            value = (value << 8) | byte as u64;
+            return Ok((value, 9));
+        }
+        value = (value << 7) | (byte & 0x7f) as u64;
+        if byte & 0x80 == 0 {
+            return Ok((value, i + 1));
+        }
+    }
+    Err("Invalid SQLite varint".into())
+}
+
+fn read_u16(data: &[u8], offset: usize) -> Result<u16, String> {
+    let bytes = data
+        .get(offset..offset + 2)
+        .ok_or_else(|| "Unexpected end reading u16".to_string())?;
+    Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_u32(data: &[u8], offset: usize) -> Result<u32, String> {
+    let bytes = data
+        .get(offset..offset + 4)
+        .ok_or_else(|| "Unexpected end reading u32".to_string())?;
+    Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn parse_table_by_spacing(lines: &[String], sep_idx: usize) -> Vec<InstalledApp> {
+    let splitter = Regex::new(r"\s{2,}").ok();
+    let Some(splitter) = splitter else {
+        return vec![];
+    };
+
+    let mut apps = vec![];
+    for line in &lines[sep_idx + 1..] {
+        let trimmed = line.trim();
+        if trimmed.starts_with("---") {
+            continue;
+        }
+
+        let parts: Vec<&str> = splitter
+            .split(trimmed)
+            .filter(|p| !p.trim().is_empty())
+            .collect();
+
+        if parts.len() < 3 {
+            continue;
+        }
+
+        let source = if parts.len() > 3 {
+            parts.last().copied().unwrap_or_default()
+        } else {
+            ""
+        };
+
+        apps.push(InstalledApp {
+            name: parts[0].trim().to_string(),
+            id: parts[1].trim().to_string(),
+            version: parts[2].trim().to_string(),
+            source: source.trim().to_string(),
+        });
+    }
+
+    apps
 }
 
 fn parse_registry_uninstall_output(raw: &str) -> Vec<InstalledApp> {
@@ -471,6 +893,36 @@ Visual Studio Code   Microsoft.VisualStudioCode 1.2.3   winget
         assert_eq!(apps[0].version, "1.0.0");
         assert_eq!(apps[0].source, "winget");
         assert_eq!(apps[1].id, "Microsoft.VisualStudioCode");
+    }
+
+    #[test]
+    fn parses_winget_tables_with_ansi_and_spacing_fallback() {
+        let raw = "\
+\x1b[?25lName              Id                          Version Match        Source
+---------------------------------------------------------------------------
+Visual Studio Code  Microsoft.VisualStudioCode  1.2.3   Moniker: code winget
+Docker Desktop      Docker.DockerDesktop        4.0.0   Tag: docker   winget
+\x1b[?25h";
+
+        let apps = WingetService::new().parse_table(raw);
+
+        assert_eq!(apps.len(), 2);
+        assert_eq!(apps[0].name, "Visual Studio Code");
+        assert_eq!(apps[0].id, "Microsoft.VisualStudioCode");
+        assert_eq!(apps[1].source, "winget");
+    }
+
+    #[test]
+    fn reads_local_winget_source_index_when_present() {
+        let Some(path) = find_winget_source_index() else {
+            return;
+        };
+
+        let apps = read_winget_packages_from_sqlite(&path).expect("read winget source index");
+
+        assert!(apps
+            .iter()
+            .any(|app| app.id == "Microsoft.VisualStudioCode"));
     }
 
     #[test]

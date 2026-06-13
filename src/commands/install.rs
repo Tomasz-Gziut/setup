@@ -18,6 +18,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::constants::PRESET_DIR;
 use crate::services::winget::WingetService;
@@ -120,7 +121,7 @@ impl SelectorApp {
 
                 let line = Line::from(vec![
                     Span::styled(format!("{} ", status_sym), Style::default().fg(status_color)),
-                    Span::raw(format!("{:<35}", truncate(&p.name, 35))),
+                    Span::raw(fit_cell(&p.name, 35)),
                     Span::styled(
                         format!(" {:>3} apps  ", p.app_count),
                         Style::default().fg(Color::Gray),
@@ -276,5 +277,33 @@ pub fn run(config_path: Option<String>) -> Result<()> {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max { s.to_string() } else { format!("{}…", &s[..max.saturating_sub(1)]) }
+    if UnicodeWidthStr::width(s) <= max {
+        s.to_string()
+    } else if max == 0 {
+        String::new()
+    } else {
+        let ellipsis_width = UnicodeWidthChar::width('…').unwrap_or(1);
+        let text_width = max.saturating_sub(ellipsis_width);
+        let mut width = 0;
+        let mut out = String::new();
+        for ch in s.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if width + ch_width > text_width {
+                break;
+            }
+            out.push(ch);
+            width += ch_width;
+        }
+        out.push('…');
+        out
+    }
+}
+
+fn fit_cell(s: &str, width: usize) -> String {
+    let mut out = truncate(s, width);
+    let used = UnicodeWidthStr::width(out.as_str());
+    if used < width {
+        out.push_str(&" ".repeat(width - used));
+    }
+    out
 }

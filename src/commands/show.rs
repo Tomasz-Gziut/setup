@@ -1,4 +1,5 @@
 use anyhow::Result;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::services::winget::WingetService;
 
@@ -36,12 +37,12 @@ pub fn run() -> Result<()> {
     println!("{sep}");
 
     for app in &apps {
-        let name = truncate(&app.name, w_name);
-        let id = truncate(&app.id, w_id);
-        let ver = truncate(&app.version, w_ver);
+        let name = fit_cell(&app.name, w_name);
+        let id = fit_cell(&app.id, w_id);
+        let ver = fit_cell(&app.version, w_ver);
         let src = if app.source.is_empty() { "N/A" } else { &app.source };
-        let src = truncate(src, w_src);
-        println!("| {name:<w_name$} | {id:<w_id$} | {ver:<w_ver$} | {src:<w_src$} |");
+        let src = fit_cell(src, w_src);
+        println!("| {name} | {id} | {ver} | {src} |");
     }
 
     println!("{sep}");
@@ -51,9 +52,33 @@ pub fn run() -> Result<()> {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if UnicodeWidthStr::width(s) <= max {
         s.to_string()
+    } else if max == 0 {
+        String::new()
     } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
+        let ellipsis_width = UnicodeWidthChar::width('…').unwrap_or(1);
+        let text_width = max.saturating_sub(ellipsis_width);
+        let mut width = 0;
+        let mut out = String::new();
+        for ch in s.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if width + ch_width > text_width {
+                break;
+            }
+            out.push(ch);
+            width += ch_width;
+        }
+        out.push('…');
+        out
     }
+}
+
+fn fit_cell(s: &str, width: usize) -> String {
+    let mut out = truncate(s, width);
+    let used = UnicodeWidthStr::width(out.as_str());
+    if used < width {
+        out.push_str(&" ".repeat(width - used));
+    }
+    out
 }
