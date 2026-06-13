@@ -141,7 +141,7 @@ impl CreateApp {
             .filter(|a| !winget.is_system_app(a))
             .collect();
 
-        let all_apps = winget.search_app("");
+        let all_apps = merge_apps_by_id(installed_apps.clone(), winget.search_app(""));
 
         let mut app = Self {
             mode: Mode::Normal,
@@ -1064,6 +1064,22 @@ fn normalize_name(name: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn merge_apps_by_id(
+    mut base: Vec<InstalledApp>,
+    additional: Vec<InstalledApp>,
+) -> Vec<InstalledApp> {
+    let mut seen: HashMap<String, ()> = HashMap::new();
+    base.retain(|app| seen.insert(app.id.to_lowercase(), ()).is_none());
+
+    for app in additional {
+        if seen.insert(app.id.to_lowercase(), ()).is_none() {
+            base.push(app);
+        }
+    }
+
+    base
 }
 
 fn truncate(s: &str, max: usize) -> String {

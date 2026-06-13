@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
@@ -122,11 +123,23 @@ impl WingetService {
 
     pub fn get_installed_apps(&self) -> Vec<InstalledApp> {
         let out = self.run(&["list", "--disable-interactivity"]);
-        self.parse_table(&out)
+        let apps = self.parse_table(&out);
+        if apps.is_empty() {
+            self.get_installed_apps_from_registry()
+        } else {
+            apps
+        }
     }
 
     pub fn is_available_in_winget(&self, id: &str) -> bool {
-        let out = self.run(&["search", "--id", id, "--exact", "--disable-interactivity"]);
+        let out = self.run(&[
+            "search",
+            "--id",
+            id,
+            "--exact",
+            "--accept-source-agreements",
+            "--disable-interactivity",
+        ]);
         out.to_lowercase().contains(&id.to_lowercase())
     }
 
@@ -137,11 +150,15 @@ impl WingetService {
     }
 
     pub fn search_app(&self, query: &str) -> Vec<InstalledApp> {
-        let args = vec![
-            "search".to_string(),
-            query.to_string(),
-            "--disable-interactivity".to_string(),
-        ];
+        let query = query.trim();
+        let mut args = vec!["search".to_string()];
+        if !query.is_empty() {
+            args.push("--query".to_string());
+            args.push(query.to_string());
+        }
+        args.push("--accept-source-agreements".to_string());
+        args.push("--disable-interactivity".to_string());
+
         let out = self.run_str(&args);
         self.parse_table(&out)
     }
@@ -256,11 +273,11 @@ impl WingetService {
         // Column start positions from dash groups in separator
         let mut col_starts: Vec<usize> = vec![];
         let mut in_dash = false;
-        for (i, b) in sep.bytes().enumerate() {
-            if b == b'-' && !in_dash {
+        for (i, c) in sep.chars().enumerate() {
+            if c == '-' && !in_dash {
                 col_starts.push(i);
                 in_dash = true;
-            } else if b == b' ' {
+            } else if c == ' ' {
                 in_dash = false;
             }
         }
@@ -275,13 +292,17 @@ impl WingetService {
             if line.trim().starts_with("---") {
                 continue;
             }
-            let lb = line.as_bytes();
-            let ll = lb.len();
+            let ll = line.chars().count();
 
             let col = |s: usize, e: usize| -> String {
                 let s = s.min(ll);
                 let e = e.min(ll);
-                String::from_utf8_lossy(&lb[s..e]).trim().to_string()
+                line.chars()
+                    .skip(s)
+                    .take(e.saturating_sub(s))
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
             };
 
             let last = col_starts.len() - 1;
@@ -300,5 +321,176 @@ impl WingetService {
         }
 
         apps
+    }
+
+    fn get_installed_apps_from_registry(&self) -> Vec<InstalledApp> {
+        let roots = [
+            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+            r"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        ];
+
+        let mut apps = vec![];
+        let mut seen = HashSet::new();
+
+        for root in roots {
+            let mut cmd = Command::new("reg");
+            cmd.args(["query", root, "/s"]);
+            #[cfg(windows)]
+            cmd.creation_flags(CREATE_NO_WINDOW);
+
+            let Ok(out) = cmd.output() else {
+                continue;
+            };
+
+            let raw = String::from_utf8_lossy(&out.stdout);
+            for app in parse_registry_uninstall_output(&raw) {
+                let key = app.name.to_lowercase();
+                if seen.insert(key) {
+                    apps.push(app);
+                }
+            }
+        }
+
+        apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        apps
+    }
+}
+
+fn parse_registry_uninstall_output(raw: &str) -> Vec<InstalledApp> {
+    let mut apps = vec![];
+    let mut current_key = String::new();
+    let mut package_id = String::new();
+    let mut name = String::new();
+    let mut version = String::new();
+    let mut system_component = false;
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("HKEY_") {
+            push_registry_app(
+                &mut apps,
+                &current_key,
+                &package_id,
+                &name,
+                &version,
+                system_component,
+            );
+            current_key = trimmed.to_string();
+            package_id.clear();
+            name.clear();
+            version.clear();
+            system_component = false;
+            continue;
+        }
+
+        if let Some(value) = parse_reg_value(trimmed, "WinGetPackageIdentifier") {
+            package_id = value;
+        } else if let Some(value) = parse_reg_value(trimmed, "DisplayName") {
+            name = value;
+        } else if let Some(value) = parse_reg_value(trimmed, "DisplayVersion") {
+            version = value;
+        } else if let Some(value) = parse_reg_value(trimmed, "SystemComponent") {
+            system_component = value.trim() == "0x1";
+        }
+    }
+
+    push_registry_app(
+        &mut apps,
+        &current_key,
+        &package_id,
+        &name,
+        &version,
+        system_component,
+    );
+    apps
+}
+
+fn parse_reg_value(line: &str, name: &str) -> Option<String> {
+    if !line.starts_with(name) {
+        return None;
+    }
+
+    let rest = line[name.len()..].trim_start();
+    let value_start = rest.find("    ").map(|idx| idx + 4)?;
+    Some(rest[value_start..].trim().to_string())
+}
+
+fn push_registry_app(
+    apps: &mut Vec<InstalledApp>,
+    key: &str,
+    package_id: &str,
+    name: &str,
+    version: &str,
+    system_component: bool,
+) {
+    if name.trim().is_empty() || system_component {
+        return;
+    }
+
+    let id = if package_id.trim().is_empty() {
+        key.rsplit('\\')
+            .next()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(name)
+            .to_string()
+    } else {
+        package_id.trim().to_string()
+    };
+
+    apps.push(InstalledApp {
+        name: name.trim().to_string(),
+        id,
+        version: version.trim().to_string(),
+        source: if package_id.trim().is_empty() {
+            "registry".into()
+        } else {
+            "winget".into()
+        },
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_winget_tables_with_non_ascii_names() {
+        let raw = "\
+Name                 Id                         Version Source
+-------------------- -------------------------- ------- ------
+Zażółć gęślą jaźń    Example.Polish             1.0.0   winget
+Visual Studio Code   Microsoft.VisualStudioCode 1.2.3   winget
+";
+
+        let apps = WingetService::new().parse_table(raw);
+
+        assert_eq!(apps.len(), 2);
+        assert_eq!(apps[0].name, "Zażółć gęślą jaźń");
+        assert_eq!(apps[0].id, "Example.Polish");
+        assert_eq!(apps[0].version, "1.0.0");
+        assert_eq!(apps[0].source, "winget");
+        assert_eq!(apps[1].id, "Microsoft.VisualStudioCode");
+    }
+
+    #[test]
+    fn parses_registry_uninstall_entries() {
+        let raw = r"
+HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Example
+    DisplayName    REG_SZ    Example App
+    DisplayVersion    REG_SZ    2.3.4
+
+HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Hidden
+    DisplayName    REG_SZ    Hidden Runtime
+    SystemComponent    REG_DWORD    0x1
+";
+
+        let apps = parse_registry_uninstall_output(raw);
+
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].name, "Example App");
+        assert_eq!(apps[0].id, "Example");
+        assert_eq!(apps[0].version, "2.3.4");
+        assert_eq!(apps[0].source, "registry");
     }
 }
