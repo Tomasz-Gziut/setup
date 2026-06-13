@@ -1,29 +1,80 @@
 # setup
 
-CLI tool do zarządzania aplikacjami Windows przez winget. Standalone EXE - działa na świeżym Windowsie bez żadnych zależności.
-
-## Użycie
-
-### Pokaż zainstalowane aplikacje
-```bash
-setup.exe show
+```powershell
+cargo clean
+cargo install --path . --force
+setup
 ```
-Wyświetla wszystkie zainstalowane aplikacje w tabeli (Name, ID, Version, Source).
 
-### Eksportuj config
-```bash
-setup.exe export ./my-apps.json
-```
-Eksportuje listę zainstalowanych aplikacji do pliku JSON. Automatycznie:
-- Wyklucza aplikacje systemowe, sterowniki i runtimey
-- Sprawdza dostępność każdej aplikacji w winget
-- Oznacza niedostępne aplikacje flagą `availableInWinget: false`
+CLI/TUI do zarzadzania aplikacjami Windows przez `winget`.
 
-### Zainstaluj z configa
-```bash
-setup.exe install ./my-apps.json
+Domyslne uruchomienie komendy `setup` otwiera interaktywny widok TUI do tworzenia presetow aplikacji. Binarka zawiera manifest Windows `asInvoker`, zeby sama nazwa `setup.exe` nie uruchamiala automatycznie okna UAC.
+
+## Wymagania
+
+- Windows 10/11
+- Rust/Cargo
+- `winget` (Windows Package Manager)
+
+## Instalacja
+
+```powershell
+cargo clean
+cargo install --path . --force
+setup
 ```
-Instaluje wszystkie aplikacje z pliku config przez winget. Aplikacje oznaczone jako niedostępne są pomijane z odpowiednim komunikatem.
+
+Po instalacji `setup.exe` trafia zwykle do:
+
+```powershell
+C:\Users\<user>\.cargo\bin\setup.exe
+```
+
+Sprawdz, ktora binarka jest uruchamiana:
+
+```powershell
+where.exe setup
+```
+
+## Uzycie
+
+### Interaktywny manager
+
+```powershell
+setup
+```
+
+Uruchamia TUI, w ktorym mozna wyszukiwac aplikacje, zaznaczac je, zapisywac presety oraz instalowac albo odinstalowywac wybrane pozycje.
+
+### Pokaz zainstalowane aplikacje
+
+```powershell
+setup show
+```
+
+Wyswietla zainstalowane aplikacje w tabeli: `Name`, `ID`, `Version`, `Source`.
+
+### Eksportuj konfiguracje
+
+```powershell
+setup export .\my-apps.json
+```
+
+Eksportuje liste zainstalowanych aplikacji do pliku JSON. Podczas eksportu narzedzie:
+
+- wyklucza aplikacje systemowe, sterowniki i runtime'y,
+- sprawdza dostepnosc aplikacji w `winget`,
+- oznacza niedostepne aplikacje jako `availableInWinget: false`.
+
+### Instaluj z konfiguracji
+
+```powershell
+setup install .\my-apps.json
+```
+
+Instaluje aplikacje z pliku konfiguracyjnego przez `winget`. Aplikacje oznaczone jako niedostepne sa pomijane.
+
+Instalacja i deinstalacja uzywaja `winget --silent --disable-interactivity`, zeby ograniczyc osobne okna instalatorow.
 
 ## Format config.json
 
@@ -41,7 +92,7 @@ Instaluje wszystkie aplikacje z pliku config przez winget. Aplikacje oznaczone j
       "name": "Some App",
       "version": "latest",
       "availableInWinget": false,
-      "note": "Niedostępne przez winget - zainstaluj ręcznie"
+      "note": "Not available via winget - install manually"
     }
   ]
 }
@@ -49,14 +100,16 @@ Instaluje wszystkie aplikacje z pliku config przez winget. Aplikacje oznaczone j
 
 ## Build
 
-```bash
-npm install
-npm run build:exe
+Debug build:
+
+```powershell
+cargo build
 ```
 
-Generuje `setup.exe` (~38 MB) - standalone executable bez potrzeby Node.js.
+Release/installowana binarka:
 
-## Wymagania
+```powershell
+cargo install --path . --force
+```
 
-- Windows 10/11
-- winget (Windows Package Manager) - wbudowany w Windows 11, dla Windows 10 dostępny przez Microsoft Store
+Projekt osadza manifest Windows przez `build.rs` i `app.manifest`, z poziomem uprawnien `asInvoker`.

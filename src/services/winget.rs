@@ -157,6 +157,7 @@ impl WingetService {
             "--accept-source-agreements",
             "--accept-package-agreements",
             "--disable-interactivity",
+            "--silent",
             "--force",
         ])
         .stdout(Stdio::piped())
@@ -194,7 +195,15 @@ impl WingetService {
 
     pub fn uninstall_app(&self, id: &str, mut on_line: impl FnMut(&str)) -> InstallResult {
         let mut cmd = Command::new("winget");
-        cmd.args(["uninstall", "--id", id, "--disable-interactivity", "--force", "--purge"])
+        cmd.args([
+            "uninstall",
+            "--id",
+            id,
+            "--disable-interactivity",
+            "--silent",
+            "--force",
+            "--purge",
+        ])
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         #[cfg(windows)]
