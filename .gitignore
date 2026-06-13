@@ -1,16 +1,5 @@
-# Dependencies
-node_modules/
-
-# Build output
-dist/
-build/
-
-# Executables (keep setup.exe for releases)
-# *.exe
-
-# Logs
-*.log
-npm-debug.log*
+# Rust build output
+/target/
 
 # IDE
 .idea/
