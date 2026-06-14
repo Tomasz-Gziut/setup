@@ -97,9 +97,19 @@ struct ProgressState {
 }
 
 enum ProgressMsg {
-    AppStart { idx: usize },
-    AppProgress { idx: usize, progress: f64, last_line: String },
-    AppDone { idx: usize, status: String, message: String },
+    AppStart {
+        idx: usize,
+    },
+    AppProgress {
+        idx: usize,
+        progress: f64,
+        last_line: String,
+    },
+    AppDone {
+        idx: usize,
+        status: String,
+        message: String,
+    },
     Done(String),
 }
 
@@ -684,6 +694,14 @@ impl CreateApp {
             _ => return,
         };
 
+        if state.done {
+            self.draw_progress_summary(state, frame);
+        } else {
+            self.draw_progress_running(state, frame);
+        }
+    }
+
+    fn draw_progress_running(&self, state: &ProgressState, frame: &mut Frame) {
         let area = frame.area();
         let chunks = Layout::vertical([
             Constraint::Length(3), // title
@@ -693,144 +711,207 @@ impl CreateApp {
         ])
         .split(area);
 
-        // Title
-        let title_text = if state.done {
-            format!("{} – Complete", state.title)
-        } else {
-            state.title.clone()
-        };
         frame.render_widget(
-            Paragraph::new(title_text)
+            Paragraph::new(state.title.clone())
                 .style(Style::default().fg(Color::Cyan))
                 .block(Block::default().borders(Borders::ALL)),
             chunks[0],
         );
 
-        // Overall gauge
         let done_count = state
             .apps
             .iter()
-            .filter(|a| matches!(a.status, AppRunStatus::Ok | AppRunStatus::Skip | AppRunStatus::Fail))
+            .filter(|a| {
+                matches!(
+                    a.status,
+                    AppRunStatus::Ok | AppRunStatus::Skip | AppRunStatus::Fail
+                )
+            })
             .count();
         let overall = if state.apps.is_empty() {
             1.0_f64
         } else {
             state.apps.iter().map(|a| a.progress).sum::<f64>() / state.apps.len() as f64
         };
-        let gauge_color = if state.done { Color::Green } else { Color::Cyan };
         frame.render_widget(
             Gauge::default()
                 .block(Block::default().borders(Borders::ALL).title("Overall"))
-                .gauge_style(Style::default().fg(gauge_color).bg(Color::DarkGray))
+                .gauge_style(Style::default().fg(Color::Cyan).bg(Color::DarkGray))
                 .ratio(overall)
                 .label(format!("{}/{}", done_count, state.apps.len())),
             chunks[1],
         );
 
-        // Per-app list
-        let list_inner_h = chunks[2].height.saturating_sub(2) as usize;
-        let list_inner_w = chunks[2].width.saturating_sub(2) as usize;
-        let bar_w = 16usize;
-        let pct_w = 4usize;
-        let name_w = (list_inner_w / 3).clamp(12, 30);
-        let last_w =
-            list_inner_w.saturating_sub(2 + name_w + 1 + (bar_w + 2) + 1 + pct_w + 1);
-
-        let spin_frame = (state.start_time.elapsed().as_millis() / 80) as usize;
-
-        let items: Vec<ListItem> = state
+        let running = state
             .apps
             .iter()
-            .enumerate()
-            .skip(state.scroll_offset)
-            .take(list_inner_h)
-            .map(|(idx, app)| {
-                let (sym, col) = match &app.status {
-                    AppRunStatus::Waiting => ("·".to_string(), Color::DarkGray),
-                    AppRunStatus::Running => (
-                        SPINNER[(spin_frame + idx) % SPINNER.len()].to_string(),
-                        Color::Yellow,
-                    ),
-                    AppRunStatus::Ok => ("✓".to_string(), Color::Green),
-                    AppRunStatus::Skip => ("─".to_string(), Color::Yellow),
-                    AppRunStatus::Fail => ("✗".to_string(), Color::Red),
-                };
-                let bar_col = match &app.status {
-                    AppRunStatus::Running => Color::Cyan,
-                    AppRunStatus::Ok => Color::Green,
-                    AppRunStatus::Fail => Color::Red,
-                    AppRunStatus::Skip => Color::Yellow,
-                    AppRunStatus::Waiting => Color::DarkGray,
-                };
-                let filled = (app.progress * bar_w as f64) as usize;
-                let bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(bar_w - filled));
-                let pct = format!("{:>3}%", (app.progress * 100.0) as u8);
-                let last = match &app.status {
-                    AppRunStatus::Waiting => "waiting…".to_string(),
-                    AppRunStatus::Ok | AppRunStatus::Skip | AppRunStatus::Fail => {
-                        truncate(&app.message, last_w.max(1))
-                    }
-                    AppRunStatus::Running => truncate(&app.last_line, last_w.max(1)),
-                };
-
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{} ", sym), Style::default().fg(col)),
-                    Span::raw(fit_cell(&app.name, name_w)),
-                    Span::raw(" "),
-                    Span::styled(bar, Style::default().fg(bar_col)),
-                    Span::raw(" "),
-                    Span::styled(pct, Style::default().fg(bar_col)),
-                    Span::raw(" "),
-                    Span::styled(last, Style::default().fg(Color::DarkGray)),
-                ]))
-            })
-            .collect();
-
-        let list_title = if state.done {
-            format!("Applications ({} done)", done_count)
-        } else {
-            let running = state
-                .apps
-                .iter()
-                .filter(|a| a.status == AppRunStatus::Running)
-                .count();
-            format!("Applications ({} running)", running)
-        };
+            .filter(|a| a.status == AppRunStatus::Running)
+            .count();
+        let waiting = state
+            .apps
+            .iter()
+            .filter(|a| a.status == AppRunStatus::Waiting)
+            .count();
+        render_app_list(state, frame, chunks[2], true);
         frame.render_widget(
-            List::new(items)
-                .block(Block::default().borders(Borders::ALL).title(list_title)),
-            chunks[2],
-        );
-
-        // Status bar
-        let status_text = if state.done {
-            let ok = state.apps.iter().filter(|a| a.status == AppRunStatus::Ok).count();
-            let skip = state.apps.iter().filter(|a| a.status == AppRunStatus::Skip).count();
-            let fail = state.apps.iter().filter(|a| a.status == AppRunStatus::Fail).count();
-            format!(
-                "  OK: {}  Skipped: {}  Failed: {}    [any key to return]",
-                ok, skip, fail
-            )
-        } else {
-            let running = state
-                .apps
-                .iter()
-                .filter(|a| a.status == AppRunStatus::Running)
-                .count();
-            let waiting = state
-                .apps
-                .iter()
-                .filter(|a| a.status == AppRunStatus::Waiting)
-                .count();
-            format!("  Running: {}  Waiting: {}    [↑↓/j/k] scroll", running, waiting)
-        };
-        frame.render_widget(
-            Paragraph::new(status_text)
-                .style(Style::default().fg(Color::DarkGray))
-                .block(Block::default().borders(Borders::ALL)),
+            Paragraph::new(format!(
+                "  Running: {}  Waiting: {}    [↑↓/j/k] scroll",
+                running, waiting
+            ))
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().borders(Borders::ALL)),
             chunks[3],
         );
     }
+
+    fn draw_progress_summary(&self, state: &ProgressState, frame: &mut Frame) {
+        let area = frame.area();
+
+        let ok = state
+            .apps
+            .iter()
+            .filter(|a| a.status == AppRunStatus::Ok)
+            .count();
+        let fail = state
+            .apps
+            .iter()
+            .filter(|a| a.status == AppRunStatus::Fail)
+            .count();
+        let skip = state
+            .apps
+            .iter()
+            .filter(|a| a.status == AppRunStatus::Skip)
+            .count();
+
+        let (title_text, title_color) = if fail == 0 {
+            (format!("{} – Complete", state.title), Color::Green)
+        } else {
+            (
+                format!("{} – Complete (with errors)", state.title),
+                Color::Red,
+            )
+        };
+
+        let chunks = Layout::vertical([
+            Constraint::Length(3), // title
+            Constraint::Min(3),    // results list
+            Constraint::Length(3), // summary + enter
+        ])
+        .split(area);
+
+        frame.render_widget(
+            Paragraph::new(title_text)
+                .style(Style::default().fg(title_color))
+                .block(Block::default().borders(Borders::ALL)),
+            chunks[0],
+        );
+
+        render_app_list(state, frame, chunks[1], false);
+
+        let summary = format!(
+            "  ✓ OK: {}   ✗ Failed: {}   ─ Skipped: {}    [Enter] return to app list",
+            ok, fail, skip
+        );
+        let summary_color = if fail > 0 { Color::Red } else { Color::Green };
+        frame.render_widget(
+            Paragraph::new(summary)
+                .style(Style::default().fg(summary_color))
+                .block(Block::default().borders(Borders::ALL)),
+            chunks[2],
+        );
+    }
+}
+
+fn render_app_list(
+    state: &ProgressState,
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    in_progress: bool,
+) {
+    let list_inner_h = area.height.saturating_sub(2) as usize;
+    let list_inner_w = area.width.saturating_sub(2) as usize;
+    let name_w = (list_inner_w / 3).clamp(12, 30);
+
+    let spin_frame = (state.start_time.elapsed().as_millis() / 80) as usize;
+
+    // progress bars only shown during install, not in summary
+    let (bar_w, pct_w) = if in_progress {
+        (16usize, 4usize)
+    } else {
+        (0, 0)
+    };
+    let bar_section = if in_progress {
+        bar_w + 2 + 1 + pct_w + 1
+    } else {
+        0
+    };
+    let last_w = list_inner_w.saturating_sub(2 + name_w + 1 + bar_section);
+
+    let items: Vec<ListItem> = state
+        .apps
+        .iter()
+        .enumerate()
+        .skip(state.scroll_offset)
+        .take(list_inner_h)
+        .map(|(idx, app)| {
+            let (sym, col) = match &app.status {
+                AppRunStatus::Waiting => ("·".to_string(), Color::DarkGray),
+                AppRunStatus::Running => (
+                    SPINNER[(spin_frame + idx) % SPINNER.len()].to_string(),
+                    Color::Yellow,
+                ),
+                AppRunStatus::Ok => ("✓".to_string(), Color::Green),
+                AppRunStatus::Skip => ("─".to_string(), Color::Yellow),
+                AppRunStatus::Fail => ("✗".to_string(), Color::Red),
+            };
+            let bar_col = match &app.status {
+                AppRunStatus::Running => Color::Cyan,
+                AppRunStatus::Ok => Color::Green,
+                AppRunStatus::Fail => Color::Red,
+                AppRunStatus::Skip | AppRunStatus::Waiting => Color::DarkGray,
+            };
+            let last = match &app.status {
+                AppRunStatus::Waiting => "waiting…".to_string(),
+                AppRunStatus::Ok | AppRunStatus::Skip | AppRunStatus::Fail => {
+                    truncate(&app.message, last_w.max(1))
+                }
+                AppRunStatus::Running => truncate(&app.last_line, last_w.max(1)),
+            };
+
+            let mut spans = vec![
+                Span::styled(format!("{} ", sym), Style::default().fg(col)),
+                Span::raw(fit_cell(&app.name, name_w)),
+            ];
+            if in_progress {
+                let filled = (app.progress * bar_w as f64) as usize;
+                let bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(bar_w - filled));
+                let pct = format!("{:>3}%", (app.progress * 100.0) as u8);
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(bar, Style::default().fg(bar_col)));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(pct, Style::default().fg(bar_col)));
+            }
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(last, Style::default().fg(Color::DarkGray)));
+
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let list_title = if in_progress {
+        let running = state
+            .apps
+            .iter()
+            .filter(|a| a.status == AppRunStatus::Running)
+            .count();
+        format!("Applications ({} running)", running)
+    } else {
+        format!("Results ({} apps)", state.apps.len())
+    };
+    frame.render_widget(
+        List::new(items).block(Block::default().borders(Borders::ALL).title(list_title)),
+        area,
+    );
 }
 
 // ─── main event loop ─────────────────────────────────────────────────────────
@@ -1168,7 +1249,11 @@ fn handle_progress_event(app: &mut CreateApp, ev: &Event) {
                         a.status = AppRunStatus::Running;
                     }
                 }
-                Ok(ProgressMsg::AppProgress { idx, progress, last_line }) => {
+                Ok(ProgressMsg::AppProgress {
+                    idx,
+                    progress,
+                    last_line,
+                }) => {
                     if let Some(a) = state.apps.get_mut(idx) {
                         a.progress = progress;
                         let clean = strip_ansi_cr(&last_line);
@@ -1177,7 +1262,11 @@ fn handle_progress_event(app: &mut CreateApp, ev: &Event) {
                         }
                     }
                 }
-                Ok(ProgressMsg::AppDone { idx, status, message }) => {
+                Ok(ProgressMsg::AppDone {
+                    idx,
+                    status,
+                    message,
+                }) => {
                     if let Some(a) = state.apps.get_mut(idx) {
                         a.progress = 1.0;
                         a.status = match status.as_str() {
@@ -1220,7 +1309,7 @@ fn handle_progress_event(app: &mut CreateApp, ev: &Event) {
     // Phase 2: if done, wait for any key then return to main view
     if is_done {
         if let Event::Key(key) = ev {
-            if key.kind == KeyEventKind::Press {
+            if key.kind == KeyEventKind::Press && key.code == KeyCode::Enter {
                 let winget = WingetService::new();
                 let installed: Vec<InstalledApp> = winget
                     .get_installed_apps()
@@ -1302,8 +1391,16 @@ fn run_action(
                         PendingAction::Install(_) => winget.install_app(&a.id, &mut cb),
                         PendingAction::Uninstall(_) => winget.uninstall_app(&a.id, &mut cb),
                     };
-                    let status = if result.success { "OK".to_string() } else { "FAIL".to_string() };
-                    let _ = tx.send(ProgressMsg::AppDone { idx, status, message: result.message });
+                    let status = if result.success {
+                        "OK".to_string()
+                    } else {
+                        "FAIL".to_string()
+                    };
+                    let _ = tx.send(ProgressMsg::AppDone {
+                        idx,
+                        status,
+                        message: result.message,
+                    });
                 })
             })
             .collect();

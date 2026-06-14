@@ -281,7 +281,7 @@ impl WingetService {
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
 
-        let child = match cmd.spawn() {
+        let mut child = match cmd.spawn() {
             Err(e) => {
                 return InstallResult {
                     success: false,
@@ -291,7 +291,7 @@ impl WingetService {
             Ok(c) => c,
         };
 
-        let stdout = child.stdout.unwrap();
+        let stdout = child.stdout.take().unwrap();
         let reader = BufReader::new(stdout);
         let mut full_output = String::new();
 
@@ -301,9 +301,10 @@ impl WingetService {
             full_output.push('\n');
         }
 
+        let child_status = child.wait().ok();
         let is_installed = self.is_app_installed(id);
 
-        if is_installed {
+        if is_installed || child_status.map_or(false, |s| s.success()) {
             if was_installed && full_output.contains("already installed") {
                 InstallResult {
                     success: true,
@@ -343,7 +344,7 @@ impl WingetService {
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
 
-        let child = match cmd.spawn() {
+        let mut child = match cmd.spawn() {
             Err(e) => {
                 return InstallResult {
                     success: false,
@@ -353,22 +354,28 @@ impl WingetService {
             Ok(c) => c,
         };
 
-        let stdout = child.stdout.unwrap();
+        let stdout = child.stdout.take().unwrap();
         let reader = BufReader::new(stdout);
+        let mut full_output = String::new();
 
         for line in reader.lines().map_while(Result::ok) {
             on_line(&line);
+            full_output.push_str(&line);
+            full_output.push('\n');
         }
 
-        if self.is_app_installed(id) {
-            InstallResult {
-                success: false,
-                message: "Uninstall failed – app still installed".into(),
-            }
-        } else {
+        let child_status = child.wait().ok();
+        let is_installed = self.is_app_installed(id);
+
+        if !is_installed || child_status.map_or(false, |s| s.success()) {
             InstallResult {
                 success: true,
                 message: "Uninstalled successfully".into(),
+            }
+        } else {
+            InstallResult {
+                success: false,
+                message: "Uninstall failed – app still installed".into(),
             }
         }
     }
