@@ -17,7 +17,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -69,14 +69,20 @@ enum PendingAction {
 
 struct ProgressState {
     title: String,
-    lines: Vec<String>,
+    total: usize,
+    current_name: String,
+    current_id: String,
+    log_lines: Vec<String>,
+    results: Vec<(String, String, String)>, // (name, status, message)
     done: bool,
     result_msg: String,
     rx: mpsc::Receiver<ProgressMsg>,
 }
 
 enum ProgressMsg {
-    Line(String),
+    AppStart { #[allow(dead_code)] idx: usize, name: String, id: String },
+    AppLine(String),
+    AppDone { name: String, status: String, message: String },
     Done(String),
 }
 
@@ -662,29 +668,116 @@ impl CreateApp {
         };
 
         let area = frame.area();
-        let layout = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+        let chunks = Layout::vertical([
+            Constraint::Length(3), // title
+            Constraint::Length(3), // gauge
+            Constraint::Length(3), // current app
+            Constraint::Length(7), // winget log
+            Constraint::Min(3),    // results
+            Constraint::Length(3), // status bar
+        ])
+        .split(area);
 
-        let items: Vec<ListItem> = state
-            .lines
-            .iter()
-            .map(|l| ListItem::new(l.clone()))
-            .collect();
-        let list = List::new(items).block(
-            Block::default()
-                .title(format!(" {} ", state.title))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan)),
-        );
-        frame.render_widget(list, layout[0]);
-
-        let footer_text = if state.done {
-            format!("{}  Press any key to return…", state.result_msg)
+        // Title
+        let title_text = if state.done {
+            format!("{} – Complete", state.title)
         } else {
-            "Running…".to_string()
+            state.title.clone()
+        };
+        let title = Paragraph::new(title_text)
+            .style(Style::default().fg(Color::Cyan))
+            .block(Block::default().borders(Borders::ALL));
+        frame.render_widget(title, chunks[0]);
+
+        // Progress gauge
+        let done_count = state.results.len();
+        let ratio = if state.total == 0 {
+            1.0_f64
+        } else {
+            (done_count as f64 / state.total as f64).min(1.0)
+        };
+        let gauge_color = if state.done { Color::Green } else { Color::Cyan };
+        let gauge = Gauge::default()
+            .block(Block::default().borders(Borders::ALL).title("Progress"))
+            .gauge_style(Style::default().fg(gauge_color).bg(Color::DarkGray))
+            .ratio(ratio)
+            .label(format!("{}/{}", done_count, state.total));
+        frame.render_widget(gauge, chunks[1]);
+
+        // Current app
+        let current_text = if state.done {
+            "All done".to_string()
+        } else if state.current_name.is_empty() {
+            "Starting…".to_string()
+        } else {
+            format!("{} ({})", state.current_name, state.current_id)
+        };
+        let current_color = if state.done { Color::Green } else { Color::Yellow };
+        let current = Paragraph::new(current_text)
+            .style(Style::default().fg(current_color))
+            .block(Block::default().borders(Borders::ALL).title("Current"));
+        frame.render_widget(current, chunks[2]);
+
+        // Winget output log
+        let log_h = chunks[3].height.saturating_sub(2) as usize;
+        let log_w = chunks[3].width.saturating_sub(2) as usize;
+        let start = state.log_lines.len().saturating_sub(log_h);
+        let log_lines: Vec<Line> = state.log_lines[start..]
+            .iter()
+            .map(|l| Line::from(truncate(l, log_w)))
+            .collect();
+        let log = Paragraph::new(log_lines)
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().borders(Borders::ALL).title("Output"));
+        frame.render_widget(log, chunks[3]);
+
+        // Results – newest first
+        let res_w = chunks[4].width.saturating_sub(2) as usize;
+        let name_w = (res_w / 2).min(35);
+        let msg_w = res_w.saturating_sub(name_w + 12);
+        let result_items: Vec<ListItem> = state
+            .results
+            .iter()
+            .rev()
+            .map(|(name, status, msg)| {
+                let (sym, color) = match status.as_str() {
+                    "OK" => ("✓", Color::Green),
+                    "SKIP" => ("─", Color::Yellow),
+                    _ => ("✗", Color::Red),
+                };
+                let line = Line::from(vec![
+                    Span::styled(format!("{} ", sym), Style::default().fg(color)),
+                    Span::raw(fit_cell(name, name_w)),
+                    Span::styled(format!(" {:<8}", status), Style::default().fg(color)),
+                    Span::styled(truncate(msg, msg_w), Style::default().fg(Color::DarkGray)),
+                ]);
+                ListItem::new(line)
+            })
+            .collect();
+        let results_title = format!("Results ({}/{})", done_count, state.total);
+        frame.render_widget(
+            List::new(result_items)
+                .block(Block::default().borders(Borders::ALL).title(results_title)),
+            chunks[4],
+        );
+
+        // Status bar
+        let status_text = if state.done {
+            let ok = state.results.iter().filter(|(_, s, _)| s == "OK").count();
+            let skip = state.results.iter().filter(|(_, s, _)| s == "SKIP").count();
+            let fail = state.results.iter().filter(|(_, s, _)| s == "FAIL").count();
+            format!(
+                "  OK: {}  Skipped: {}  Failed: {}    [Press any key to return]",
+                ok, skip, fail
+            )
+        } else {
+            "  Running… please wait".to_string()
         };
         frame.render_widget(
-            Paragraph::new(footer_text).style(Style::default().fg(Color::DarkGray)),
-            layout[1],
+            Paragraph::new(status_text)
+                .style(Style::default().fg(Color::DarkGray))
+                .block(Block::default().borders(Borders::ALL)),
+            chunks[5],
         );
     }
 }
@@ -1019,7 +1112,20 @@ fn handle_progress_event(app: &mut CreateApp, ev: &Event) {
     let is_done = if let Mode::Progress { state } = &mut app.mode {
         loop {
             match state.rx.try_recv() {
-                Ok(ProgressMsg::Line(line)) => state.lines.push(line),
+                Ok(ProgressMsg::AppStart { idx: _, name, id }) => {
+                    state.current_name = name;
+                    state.current_id = id;
+                    state.log_lines.clear();
+                }
+                Ok(ProgressMsg::AppLine(line)) => {
+                    let clean = strip_ansi_cr(&line);
+                    if !clean.trim().is_empty() {
+                        state.log_lines.push(clean);
+                    }
+                }
+                Ok(ProgressMsg::AppDone { name, status, message }) => {
+                    state.results.push((name, status, message));
+                }
                 Ok(ProgressMsg::Done(msg)) => {
                     state.done = true;
                     state.result_msg = msg;
@@ -1043,6 +1149,10 @@ fn handle_progress_event(app: &mut CreateApp, ev: &Event) {
                     .filter(|a| !winget.is_system_app(a))
                     .collect();
                 app.rebuild_installed_index(installed);
+                app.selected.clear();
+                app.cursor_avail = 0;
+                app.cursor_sel = 0;
+                app.panel = Panel::Available;
                 app.apply_local_filter();
                 app.sync_list_states();
                 app.mode = Mode::Normal;
@@ -1061,11 +1171,16 @@ fn run_action(
         PendingAction::Uninstall(a) => ("Uninstalling", a.clone()),
     };
 
+    let total = apps.len();
     let (tx, rx) = mpsc::channel::<ProgressMsg>();
     app.mode = Mode::Progress {
         state: ProgressState {
             title: title.to_string(),
-            lines: vec![],
+            total,
+            current_name: String::new(),
+            current_id: String::new(),
+            log_lines: vec![],
+            results: vec![],
             done: false,
             result_msg: String::new(),
             rx,
@@ -1079,23 +1194,33 @@ fn run_action(
         let mut ok = 0usize;
         let mut fail = 0usize;
 
-        for a in &apps {
-            let _ = tx2.send(ProgressMsg::Line(format!(">>> {}", a.name)));
+        for (idx, a) in apps.iter().enumerate() {
+            let _ = tx2.send(ProgressMsg::AppStart {
+                idx,
+                name: a.name.clone(),
+                id: a.id.clone(),
+            });
+            let tx_line = tx2.clone();
             let result = match &action {
-                PendingAction::Install(_) => winget.install_app(&a.id, |line| {
-                    let _ = tx2.send(ProgressMsg::Line(format!("  {line}")));
+                PendingAction::Install(_) => winget.install_app(&a.id, move |line| {
+                    let _ = tx_line.send(ProgressMsg::AppLine(line.to_string()));
                 }),
-                PendingAction::Uninstall(_) => winget.uninstall_app(&a.id, |line| {
-                    let _ = tx2.send(ProgressMsg::Line(format!("  {line}")));
+                PendingAction::Uninstall(_) => winget.uninstall_app(&a.id, move |line| {
+                    let _ = tx_line.send(ProgressMsg::AppLine(line.to_string()));
                 }),
             };
-            if result.success {
+            let (status, msg) = if result.success {
                 ok += 1;
-                let _ = tx2.send(ProgressMsg::Line(format!("  OK – {}", result.message)));
+                ("OK".to_string(), result.message)
             } else {
                 fail += 1;
-                let _ = tx2.send(ProgressMsg::Line(format!("  FAIL – {}", result.message)));
-            }
+                ("FAIL".to_string(), result.message)
+            };
+            let _ = tx2.send(ProgressMsg::AppDone {
+                name: a.name.clone(),
+                status,
+                message: msg,
+            });
         }
 
         let summary = format!("Done: {ok} succeeded, {fail} failed.");
@@ -1171,6 +1296,29 @@ fn fit_cell(s: &str, width: usize) -> String {
     let used = UnicodeWidthStr::width(out.as_str());
     if used < width {
         out.push_str(&" ".repeat(width - used));
+    }
+    out
+}
+
+fn strip_ansi_cr(s: &str) -> String {
+    let s = s.rsplit('\r').next().unwrap_or(s);
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\x1b' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            i += 2;
+            while i < bytes.len() && !(0x40..=0x7E).contains(&bytes[i]) {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+        } else {
+            let ch = s[i..].chars().next().unwrap_or('\0');
+            out.push(ch);
+            i += ch.len_utf8();
+        }
     }
     out
 }
