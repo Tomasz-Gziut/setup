@@ -84,12 +84,15 @@ struct AppState {
     message: String,
 }
 
+const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
 struct ProgressState {
     title: String,
     apps: Vec<AppState>,
     done: bool,
     result_msg: String,
     scroll_offset: usize,
+    start_time: Instant,
     rx: mpsc::Receiver<ProgressMsg>,
 }
 
@@ -733,18 +736,24 @@ impl CreateApp {
         let last_w =
             list_inner_w.saturating_sub(2 + name_w + 1 + (bar_w + 2) + 1 + pct_w + 1);
 
+        let spin_frame = (state.start_time.elapsed().as_millis() / 80) as usize;
+
         let items: Vec<ListItem> = state
             .apps
             .iter()
+            .enumerate()
             .skip(state.scroll_offset)
             .take(list_inner_h)
-            .map(|app| {
+            .map(|(idx, app)| {
                 let (sym, col) = match &app.status {
-                    AppRunStatus::Waiting => ("·", Color::DarkGray),
-                    AppRunStatus::Running => ("○", Color::Yellow),
-                    AppRunStatus::Ok => ("✓", Color::Green),
-                    AppRunStatus::Skip => ("─", Color::Yellow),
-                    AppRunStatus::Fail => ("✗", Color::Red),
+                    AppRunStatus::Waiting => ("·".to_string(), Color::DarkGray),
+                    AppRunStatus::Running => (
+                        SPINNER[(spin_frame + idx) % SPINNER.len()].to_string(),
+                        Color::Yellow,
+                    ),
+                    AppRunStatus::Ok => ("✓".to_string(), Color::Green),
+                    AppRunStatus::Skip => ("─".to_string(), Color::Yellow),
+                    AppRunStatus::Fail => ("✗".to_string(), Color::Red),
                 };
                 let bar_col = match &app.status {
                     AppRunStatus::Running => Color::Cyan,
@@ -1258,9 +1267,12 @@ fn run_action(
             done: false,
             result_msg: String::new(),
             scroll_offset: 0,
+            start_time: Instant::now(),
             rx,
         },
     };
+    app.selected.clear();
+    app.cursor_sel = 0;
     terminal.draw(|f| app.draw(f))?;
 
     let tx_coord = tx.clone();

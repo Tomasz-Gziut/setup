@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 use crossterm::{
@@ -228,10 +228,13 @@ struct AppState {
     message: String,
 }
 
+const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
 struct InstallerApp {
     apps: Vec<AppState>,
     done: bool,
     scroll_offset: usize,
+    start_time: Instant,
     rx: mpsc::Receiver<InstallMsg>,
 }
 
@@ -250,6 +253,7 @@ impl InstallerApp {
                 .collect(),
             done: false,
             scroll_offset: 0,
+            start_time: Instant::now(),
             rx,
         }
     }
@@ -342,18 +346,24 @@ impl InstallerApp {
         let last_w =
             list_inner_w.saturating_sub(2 + name_w + 1 + (bar_w + 2) + 1 + pct_w + 1);
 
+        let spin_frame = (self.start_time.elapsed().as_millis() / 80) as usize;
+
         let items: Vec<ListItem> = self
             .apps
             .iter()
+            .enumerate()
             .skip(self.scroll_offset)
             .take(list_inner_h)
-            .map(|app| {
+            .map(|(idx, app)| {
                 let (sym, col) = match &app.status {
-                    AppRunStatus::Waiting => ("·", Color::DarkGray),
-                    AppRunStatus::Running => ("○", Color::Yellow),
-                    AppRunStatus::Ok => ("✓", Color::Green),
-                    AppRunStatus::Skip => ("─", Color::Yellow),
-                    AppRunStatus::Fail => ("✗", Color::Red),
+                    AppRunStatus::Waiting => ("·".to_string(), Color::DarkGray),
+                    AppRunStatus::Running => (
+                        SPINNER[(spin_frame + idx) % SPINNER.len()].to_string(),
+                        Color::Yellow,
+                    ),
+                    AppRunStatus::Ok => ("✓".to_string(), Color::Green),
+                    AppRunStatus::Skip => ("─".to_string(), Color::Yellow),
+                    AppRunStatus::Fail => ("✗".to_string(), Color::Red),
                 };
                 let bar_col = match &app.status {
                     AppRunStatus::Running => Color::Cyan,
