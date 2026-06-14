@@ -611,9 +611,18 @@ fn perform_installation(config_path: &str) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut installer = InstallerApp::new(&config.apps, rx);
+    let mut was_done = false;
 
     loop {
         installer.poll();
+
+        // Child installers (MSI/NSIS spawned by winget) may reset console mode;
+        // re-enable raw mode once when done so crossterm can read events again.
+        if installer.done && !was_done {
+            was_done = true;
+            let _ = enable_raw_mode();
+        }
+
         terminal.draw(|f| installer.draw(f))?;
 
         if event::poll(Duration::from_millis(50))? {

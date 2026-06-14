@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -1280,8 +1280,17 @@ fn handle_progress_event(app: &mut CreateApp, ev: &Event) {
                 Ok(ProgressMsg::Done(msg)) => {
                     state.done = true;
                     state.result_msg = msg;
+                    // Child installers may reset console mode; restore raw mode
+                    // so crossterm can receive key events on the summary screen.
+                    let _ = enable_raw_mode();
                 }
-                Err(_) => break,
+                Err(TryRecvError::Disconnected) => {
+                    // Background thread dropped sender without sending Done (e.g. panic).
+                    state.done = true;
+                    let _ = enable_raw_mode();
+                    break;
+                }
+                Err(TryRecvError::Empty) => break,
             }
         }
         // handle scroll keys during progress
