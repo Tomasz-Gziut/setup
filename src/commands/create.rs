@@ -67,22 +67,36 @@ enum PendingAction {
     Uninstall(Vec<AppConfig>),
 }
 
+#[derive(Clone, PartialEq)]
+enum AppRunStatus {
+    Waiting,
+    Running,
+    Ok,
+    Skip,
+    Fail,
+}
+
+struct AppState {
+    name: String,
+    progress: f64,
+    status: AppRunStatus,
+    last_line: String,
+    message: String,
+}
+
 struct ProgressState {
     title: String,
-    total: usize,
-    current_name: String,
-    current_id: String,
-    log_lines: Vec<String>,
-    results: Vec<(String, String, String)>, // (name, status, message)
+    apps: Vec<AppState>,
     done: bool,
     result_msg: String,
+    scroll_offset: usize,
     rx: mpsc::Receiver<ProgressMsg>,
 }
 
 enum ProgressMsg {
-    AppStart { #[allow(dead_code)] idx: usize, name: String, id: String },
-    AppLine(String),
-    AppDone { name: String, status: String, message: String },
+    AppStart { idx: usize },
+    AppProgress { idx: usize, progress: f64, last_line: String },
+    AppDone { idx: usize, status: String, message: String },
     Done(String),
 }
 
@@ -670,10 +684,8 @@ impl CreateApp {
         let area = frame.area();
         let chunks = Layout::vertical([
             Constraint::Length(3), // title
-            Constraint::Length(3), // gauge
-            Constraint::Length(3), // current app
-            Constraint::Length(7), // winget log
-            Constraint::Min(3),    // results
+            Constraint::Length(3), // overall gauge
+            Constraint::Min(3),    // per-app list
             Constraint::Length(3), // status bar
         ])
         .split(area);
@@ -684,100 +696,130 @@ impl CreateApp {
         } else {
             state.title.clone()
         };
-        let title = Paragraph::new(title_text)
-            .style(Style::default().fg(Color::Cyan))
-            .block(Block::default().borders(Borders::ALL));
-        frame.render_widget(title, chunks[0]);
+        frame.render_widget(
+            Paragraph::new(title_text)
+                .style(Style::default().fg(Color::Cyan))
+                .block(Block::default().borders(Borders::ALL)),
+            chunks[0],
+        );
 
-        // Progress gauge
-        let done_count = state.results.len();
-        let ratio = if state.total == 0 {
+        // Overall gauge
+        let done_count = state
+            .apps
+            .iter()
+            .filter(|a| matches!(a.status, AppRunStatus::Ok | AppRunStatus::Skip | AppRunStatus::Fail))
+            .count();
+        let overall = if state.apps.is_empty() {
             1.0_f64
         } else {
-            (done_count as f64 / state.total as f64).min(1.0)
+            state.apps.iter().map(|a| a.progress).sum::<f64>() / state.apps.len() as f64
         };
         let gauge_color = if state.done { Color::Green } else { Color::Cyan };
-        let gauge = Gauge::default()
-            .block(Block::default().borders(Borders::ALL).title("Progress"))
-            .gauge_style(Style::default().fg(gauge_color).bg(Color::DarkGray))
-            .ratio(ratio)
-            .label(format!("{}/{}", done_count, state.total));
-        frame.render_widget(gauge, chunks[1]);
+        frame.render_widget(
+            Gauge::default()
+                .block(Block::default().borders(Borders::ALL).title("Overall"))
+                .gauge_style(Style::default().fg(gauge_color).bg(Color::DarkGray))
+                .ratio(overall)
+                .label(format!("{}/{}", done_count, state.apps.len())),
+            chunks[1],
+        );
 
-        // Current app
-        let current_text = if state.done {
-            "All done".to_string()
-        } else if state.current_name.is_empty() {
-            "Starting…".to_string()
-        } else {
-            format!("{} ({})", state.current_name, state.current_id)
-        };
-        let current_color = if state.done { Color::Green } else { Color::Yellow };
-        let current = Paragraph::new(current_text)
-            .style(Style::default().fg(current_color))
-            .block(Block::default().borders(Borders::ALL).title("Current"));
-        frame.render_widget(current, chunks[2]);
+        // Per-app list
+        let list_inner_h = chunks[2].height.saturating_sub(2) as usize;
+        let list_inner_w = chunks[2].width.saturating_sub(2) as usize;
+        let bar_w = 16usize;
+        let pct_w = 4usize;
+        let name_w = (list_inner_w / 3).clamp(12, 30);
+        let last_w =
+            list_inner_w.saturating_sub(2 + name_w + 1 + (bar_w + 2) + 1 + pct_w + 1);
 
-        // Winget output log
-        let log_h = chunks[3].height.saturating_sub(2) as usize;
-        let log_w = chunks[3].width.saturating_sub(2) as usize;
-        let start = state.log_lines.len().saturating_sub(log_h);
-        let log_lines: Vec<Line> = state.log_lines[start..]
+        let items: Vec<ListItem> = state
+            .apps
             .iter()
-            .map(|l| Line::from(truncate(l, log_w)))
-            .collect();
-        let log = Paragraph::new(log_lines)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL).title("Output"));
-        frame.render_widget(log, chunks[3]);
-
-        // Results – newest first
-        let res_w = chunks[4].width.saturating_sub(2) as usize;
-        let name_w = (res_w / 2).min(35);
-        let msg_w = res_w.saturating_sub(name_w + 12);
-        let result_items: Vec<ListItem> = state
-            .results
-            .iter()
-            .rev()
-            .map(|(name, status, msg)| {
-                let (sym, color) = match status.as_str() {
-                    "OK" => ("✓", Color::Green),
-                    "SKIP" => ("─", Color::Yellow),
-                    _ => ("✗", Color::Red),
+            .skip(state.scroll_offset)
+            .take(list_inner_h)
+            .map(|app| {
+                let (sym, col) = match &app.status {
+                    AppRunStatus::Waiting => ("·", Color::DarkGray),
+                    AppRunStatus::Running => ("○", Color::Yellow),
+                    AppRunStatus::Ok => ("✓", Color::Green),
+                    AppRunStatus::Skip => ("─", Color::Yellow),
+                    AppRunStatus::Fail => ("✗", Color::Red),
                 };
-                let line = Line::from(vec![
-                    Span::styled(format!("{} ", sym), Style::default().fg(color)),
-                    Span::raw(fit_cell(name, name_w)),
-                    Span::styled(format!(" {:<8}", status), Style::default().fg(color)),
-                    Span::styled(truncate(msg, msg_w), Style::default().fg(Color::DarkGray)),
-                ]);
-                ListItem::new(line)
+                let bar_col = match &app.status {
+                    AppRunStatus::Running => Color::Cyan,
+                    AppRunStatus::Ok => Color::Green,
+                    AppRunStatus::Fail => Color::Red,
+                    AppRunStatus::Skip => Color::Yellow,
+                    AppRunStatus::Waiting => Color::DarkGray,
+                };
+                let filled = (app.progress * bar_w as f64) as usize;
+                let bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(bar_w - filled));
+                let pct = format!("{:>3}%", (app.progress * 100.0) as u8);
+                let last = match &app.status {
+                    AppRunStatus::Waiting => "waiting…".to_string(),
+                    AppRunStatus::Ok | AppRunStatus::Skip | AppRunStatus::Fail => {
+                        truncate(&app.message, last_w.max(1))
+                    }
+                    AppRunStatus::Running => truncate(&app.last_line, last_w.max(1)),
+                };
+
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{} ", sym), Style::default().fg(col)),
+                    Span::raw(fit_cell(&app.name, name_w)),
+                    Span::raw(" "),
+                    Span::styled(bar, Style::default().fg(bar_col)),
+                    Span::raw(" "),
+                    Span::styled(pct, Style::default().fg(bar_col)),
+                    Span::raw(" "),
+                    Span::styled(last, Style::default().fg(Color::DarkGray)),
+                ]))
             })
             .collect();
-        let results_title = format!("Results ({}/{})", done_count, state.total);
+
+        let list_title = if state.done {
+            format!("Applications ({} done)", done_count)
+        } else {
+            let running = state
+                .apps
+                .iter()
+                .filter(|a| a.status == AppRunStatus::Running)
+                .count();
+            format!("Applications ({} running)", running)
+        };
         frame.render_widget(
-            List::new(result_items)
-                .block(Block::default().borders(Borders::ALL).title(results_title)),
-            chunks[4],
+            List::new(items)
+                .block(Block::default().borders(Borders::ALL).title(list_title)),
+            chunks[2],
         );
 
         // Status bar
         let status_text = if state.done {
-            let ok = state.results.iter().filter(|(_, s, _)| s == "OK").count();
-            let skip = state.results.iter().filter(|(_, s, _)| s == "SKIP").count();
-            let fail = state.results.iter().filter(|(_, s, _)| s == "FAIL").count();
+            let ok = state.apps.iter().filter(|a| a.status == AppRunStatus::Ok).count();
+            let skip = state.apps.iter().filter(|a| a.status == AppRunStatus::Skip).count();
+            let fail = state.apps.iter().filter(|a| a.status == AppRunStatus::Fail).count();
             format!(
-                "  OK: {}  Skipped: {}  Failed: {}    [Press any key to return]",
+                "  OK: {}  Skipped: {}  Failed: {}    [any key to return]",
                 ok, skip, fail
             )
         } else {
-            "  Running… please wait".to_string()
+            let running = state
+                .apps
+                .iter()
+                .filter(|a| a.status == AppRunStatus::Running)
+                .count();
+            let waiting = state
+                .apps
+                .iter()
+                .filter(|a| a.status == AppRunStatus::Waiting)
+                .count();
+            format!("  Running: {}  Waiting: {}    [↑↓/j/k] scroll", running, waiting)
         };
         frame.render_widget(
             Paragraph::new(status_text)
                 .style(Style::default().fg(Color::DarkGray))
                 .block(Block::default().borders(Borders::ALL)),
-            chunks[5],
+            chunks[3],
         );
     }
 }
@@ -1112,25 +1154,53 @@ fn handle_progress_event(app: &mut CreateApp, ev: &Event) {
     let is_done = if let Mode::Progress { state } = &mut app.mode {
         loop {
             match state.rx.try_recv() {
-                Ok(ProgressMsg::AppStart { idx: _, name, id }) => {
-                    state.current_name = name;
-                    state.current_id = id;
-                    state.log_lines.clear();
-                }
-                Ok(ProgressMsg::AppLine(line)) => {
-                    let clean = strip_ansi_cr(&line);
-                    if !clean.trim().is_empty() {
-                        state.log_lines.push(clean);
+                Ok(ProgressMsg::AppStart { idx }) => {
+                    if let Some(a) = state.apps.get_mut(idx) {
+                        a.status = AppRunStatus::Running;
                     }
                 }
-                Ok(ProgressMsg::AppDone { name, status, message }) => {
-                    state.results.push((name, status, message));
+                Ok(ProgressMsg::AppProgress { idx, progress, last_line }) => {
+                    if let Some(a) = state.apps.get_mut(idx) {
+                        a.progress = progress;
+                        let clean = strip_ansi_cr(&last_line);
+                        if !clean.trim().is_empty() {
+                            a.last_line = clean;
+                        }
+                    }
+                }
+                Ok(ProgressMsg::AppDone { idx, status, message }) => {
+                    if let Some(a) = state.apps.get_mut(idx) {
+                        a.progress = 1.0;
+                        a.status = match status.as_str() {
+                            "OK" => AppRunStatus::Ok,
+                            "SKIP" => AppRunStatus::Skip,
+                            _ => AppRunStatus::Fail,
+                        };
+                        a.message = message;
+                    }
                 }
                 Ok(ProgressMsg::Done(msg)) => {
                     state.done = true;
                     state.result_msg = msg;
                 }
                 Err(_) => break,
+            }
+        }
+        // handle scroll keys during progress
+        if let Event::Key(key) = ev {
+            if key.kind == KeyEventKind::Press {
+                match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        state.scroll_offset = state.scroll_offset.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        let max = state.apps.len().saturating_sub(1);
+                        if state.scroll_offset < max {
+                            state.scroll_offset += 1;
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         state.done
@@ -1171,63 +1241,117 @@ fn run_action(
         PendingAction::Uninstall(a) => ("Uninstalling", a.clone()),
     };
 
-    let total = apps.len();
     let (tx, rx) = mpsc::channel::<ProgressMsg>();
     app.mode = Mode::Progress {
         state: ProgressState {
             title: title.to_string(),
-            total,
-            current_name: String::new(),
-            current_id: String::new(),
-            log_lines: vec![],
-            results: vec![],
+            apps: apps
+                .iter()
+                .map(|a| AppState {
+                    name: a.name.clone(),
+                    progress: 0.0,
+                    status: AppRunStatus::Waiting,
+                    last_line: String::new(),
+                    message: String::new(),
+                })
+                .collect(),
             done: false,
             result_msg: String::new(),
+            scroll_offset: 0,
             rx,
         },
     };
     terminal.draw(|f| app.draw(f))?;
 
-    let tx2 = tx.clone();
+    let tx_coord = tx.clone();
+    drop(tx);
     thread::spawn(move || {
-        let winget = WingetService::new();
-        let mut ok = 0usize;
-        let mut fail = 0usize;
+        let handles: Vec<_> = apps
+            .into_iter()
+            .enumerate()
+            .map(|(idx, a)| {
+                let tx = tx_coord.clone();
+                let action = action.clone();
+                thread::spawn(move || {
+                    let _ = tx.send(ProgressMsg::AppStart { idx });
+                    let winget = WingetService::new();
+                    let mut cur_prog = 0.0f64;
+                    let mut cb = |line: &str| {
+                        if let Some(p) = estimate_winget_progress(line) {
+                            cur_prog = cur_prog.max(p);
+                        }
+                        let _ = tx.send(ProgressMsg::AppProgress {
+                            idx,
+                            progress: cur_prog,
+                            last_line: line.to_string(),
+                        });
+                    };
+                    let result = match &action {
+                        PendingAction::Install(_) => winget.install_app(&a.id, &mut cb),
+                        PendingAction::Uninstall(_) => winget.uninstall_app(&a.id, &mut cb),
+                    };
+                    let status = if result.success { "OK".to_string() } else { "FAIL".to_string() };
+                    let _ = tx.send(ProgressMsg::AppDone { idx, status, message: result.message });
+                })
+            })
+            .collect();
 
-        for (idx, a) in apps.iter().enumerate() {
-            let _ = tx2.send(ProgressMsg::AppStart {
-                idx,
-                name: a.name.clone(),
-                id: a.id.clone(),
-            });
-            let tx_line = tx2.clone();
-            let result = match &action {
-                PendingAction::Install(_) => winget.install_app(&a.id, move |line| {
-                    let _ = tx_line.send(ProgressMsg::AppLine(line.to_string()));
-                }),
-                PendingAction::Uninstall(_) => winget.uninstall_app(&a.id, move |line| {
-                    let _ = tx_line.send(ProgressMsg::AppLine(line.to_string()));
-                }),
-            };
-            let (status, msg) = if result.success {
-                ok += 1;
-                ("OK".to_string(), result.message)
-            } else {
-                fail += 1;
-                ("FAIL".to_string(), result.message)
-            };
-            let _ = tx2.send(ProgressMsg::AppDone {
-                name: a.name.clone(),
-                status,
-                message: msg,
-            });
+        for h in handles {
+            h.join().ok();
         }
-
-        let summary = format!("Done: {ok} succeeded, {fail} failed.");
-        let _ = tx2.send(ProgressMsg::Done(summary));
+        let _ = tx_coord.send(ProgressMsg::Done("All done.".to_string()));
     });
 
     Ok(())
+}
+
+fn estimate_winget_progress(line: &str) -> Option<f64> {
+    if let Some(pct) = extract_pct(line) {
+        return Some((pct / 100.0).clamp(0.0, 0.99));
+    }
+    let lower = line.to_lowercase();
+    if lower.contains("found ") {
+        return Some(0.05);
+    }
+    if lower.contains("downloading") {
+        return Some(0.15);
+    }
+    if lower.contains("verif") {
+        return Some(0.65);
+    }
+    if lower.contains("starting package install") || lower.contains("starting install") {
+        return Some(0.80);
+    }
+    if lower.contains("successfully installed") || lower.contains("successfully uninstalled") {
+        return Some(0.95);
+    }
+    if lower.contains("already installed") {
+        return Some(0.99);
+    }
+    None
+}
+
+fn extract_pct(s: &str) -> Option<f64> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'%' {
+                if let Ok(n) = s[start..i].parse::<f64>() {
+                    if (0.0..=100.0).contains(&n) {
+                        return Some(n);
+                    }
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────

@@ -24,7 +24,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::constants::PRESET_DIR;
 use crate::services::winget::WingetService;
-use crate::types::Config;
+use crate::types::{AppConfig, Config};
 
 struct PresetInfo {
     name: String,
@@ -205,33 +205,51 @@ fn run_preset_selector() -> Result<Option<String>> {
 // ── Installation TUI ─────────────────────────────────────────────────────────
 
 enum InstallMsg {
-    AppStart { idx: usize, name: String, id: String },
-    AppLine(String),
-    AppDone { name: String, status: String, message: String },
+    AppStart { idx: usize },
+    AppProgress { idx: usize, progress: f64, last_line: String },
+    AppDone { idx: usize, status: String, message: String },
     Done,
 }
 
+#[derive(Clone, PartialEq)]
+enum AppRunStatus {
+    Waiting,
+    Running,
+    Ok,
+    Skip,
+    Fail,
+}
+
+struct AppState {
+    name: String,
+    progress: f64,
+    status: AppRunStatus,
+    last_line: String,
+    message: String,
+}
+
 struct InstallerApp {
-    total: usize,
-    current_idx: usize,
-    current_name: String,
-    current_id: String,
-    log_lines: Vec<String>,
-    results: Vec<(String, String, String)>,
+    apps: Vec<AppState>,
     done: bool,
+    scroll_offset: usize,
     rx: mpsc::Receiver<InstallMsg>,
 }
 
 impl InstallerApp {
-    fn new(total: usize, rx: mpsc::Receiver<InstallMsg>) -> Self {
+    fn new(app_configs: &[AppConfig], rx: mpsc::Receiver<InstallMsg>) -> Self {
         Self {
-            total,
-            current_idx: 0,
-            current_name: String::new(),
-            current_id: String::new(),
-            log_lines: Vec::new(),
-            results: Vec::new(),
+            apps: app_configs
+                .iter()
+                .map(|a| AppState {
+                    name: a.name.clone(),
+                    progress: 0.0,
+                    status: AppRunStatus::Waiting,
+                    last_line: String::new(),
+                    message: String::new(),
+                })
+                .collect(),
             done: false,
+            scroll_offset: 0,
             rx,
         }
     }
@@ -239,20 +257,30 @@ impl InstallerApp {
     fn poll(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                InstallMsg::AppStart { idx, name, id } => {
-                    self.current_idx = idx;
-                    self.current_name = name;
-                    self.current_id = id;
-                    self.log_lines.clear();
-                }
-                InstallMsg::AppLine(line) => {
-                    let clean = strip_ansi_cr(&line);
-                    if !clean.trim().is_empty() {
-                        self.log_lines.push(clean);
+                InstallMsg::AppStart { idx } => {
+                    if let Some(a) = self.apps.get_mut(idx) {
+                        a.status = AppRunStatus::Running;
                     }
                 }
-                InstallMsg::AppDone { name, status, message } => {
-                    self.results.push((name, status, message));
+                InstallMsg::AppProgress { idx, progress, last_line } => {
+                    if let Some(a) = self.apps.get_mut(idx) {
+                        a.progress = progress;
+                        let clean = strip_ansi_cr(&last_line);
+                        if !clean.trim().is_empty() {
+                            a.last_line = clean;
+                        }
+                    }
+                }
+                InstallMsg::AppDone { idx, status, message } => {
+                    if let Some(a) = self.apps.get_mut(idx) {
+                        a.progress = 1.0;
+                        a.status = match status.as_str() {
+                            "OK" => AppRunStatus::Ok,
+                            "SKIP" => AppRunStatus::Skip,
+                            _ => AppRunStatus::Fail,
+                        };
+                        a.message = message;
+                    }
                 }
                 InstallMsg::Done => {
                     self.done = true;
@@ -261,127 +289,194 @@ impl InstallerApp {
         }
     }
 
+    fn overall_progress(&self) -> f64 {
+        if self.apps.is_empty() {
+            return 1.0;
+        }
+        self.apps.iter().map(|a| a.progress).sum::<f64>() / self.apps.len() as f64
+    }
+
     fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
 
         let chunks = Layout::vertical([
             Constraint::Length(3), // title
-            Constraint::Length(3), // progress gauge
-            Constraint::Length(3), // current app
-            Constraint::Length(7), // winget output log
-            Constraint::Min(3),    // results list
-            Constraint::Length(3), // status / controls
+            Constraint::Length(3), // overall gauge
+            Constraint::Min(3),    // per-app list
+            Constraint::Length(3), // status bar
         ])
         .split(area);
 
         // Title
-        let title_text = if self.done {
-            "Installation Complete"
-        } else {
-            "Installing Applications"
-        };
-        let title = Paragraph::new(title_text)
-            .style(Style::default().fg(Color::Cyan))
-            .block(Block::default().borders(Borders::ALL));
-        frame.render_widget(title, chunks[0]);
+        let title_text = if self.done { "Installation Complete" } else { "Installing Applications" };
+        frame.render_widget(
+            Paragraph::new(title_text)
+                .style(Style::default().fg(Color::Cyan))
+                .block(Block::default().borders(Borders::ALL)),
+            chunks[0],
+        );
 
-        // Progress gauge
-        let done_count = self.results.len();
-        let ratio = if self.total == 0 {
-            1.0_f64
-        } else {
-            (done_count as f64 / self.total as f64).min(1.0)
-        };
+        // Overall gauge
+        let done_count = self
+            .apps
+            .iter()
+            .filter(|a| matches!(a.status, AppRunStatus::Ok | AppRunStatus::Skip | AppRunStatus::Fail))
+            .count();
         let gauge_color = if self.done { Color::Green } else { Color::Cyan };
-        let gauge = Gauge::default()
-            .block(Block::default().borders(Borders::ALL).title("Progress"))
-            .gauge_style(Style::default().fg(gauge_color).bg(Color::DarkGray))
-            .ratio(ratio)
-            .label(format!("{}/{}", done_count, self.total));
-        frame.render_widget(gauge, chunks[1]);
+        frame.render_widget(
+            Gauge::default()
+                .block(Block::default().borders(Borders::ALL).title("Overall"))
+                .gauge_style(Style::default().fg(gauge_color).bg(Color::DarkGray))
+                .ratio(self.overall_progress())
+                .label(format!("{}/{}", done_count, self.apps.len())),
+            chunks[1],
+        );
 
-        // Current app
-        let current_text = if self.done {
-            "All done".to_string()
-        } else if self.current_name.is_empty() {
-            "Starting...".to_string()
-        } else {
-            format!("{} ({})", self.current_name, self.current_id)
-        };
-        let current_color = if self.done { Color::Green } else { Color::Yellow };
-        let current = Paragraph::new(current_text)
-            .style(Style::default().fg(current_color))
-            .block(Block::default().borders(Borders::ALL).title("Current"));
-        frame.render_widget(current, chunks[2]);
+        // Per-app list
+        let list_inner_h = chunks[2].height.saturating_sub(2) as usize;
+        let list_inner_w = chunks[2].width.saturating_sub(2) as usize;
+        let bar_w = 16usize;
+        let pct_w = 4usize; // "100%"
+        let name_w = (list_inner_w / 3).clamp(12, 30);
+        // layout: sym(2) + name(name_w) + sp(1) + bar(bar_w+2) + sp(1) + pct(pct_w) + sp(1) + last
+        let last_w =
+            list_inner_w.saturating_sub(2 + name_w + 1 + (bar_w + 2) + 1 + pct_w + 1);
 
-        // Winget output log — last N lines that fit
-        let log_inner_h = chunks[3].height.saturating_sub(2) as usize;
-        let log_inner_w = chunks[3].width.saturating_sub(2) as usize;
-        let start = self.log_lines.len().saturating_sub(log_inner_h);
-        let log_lines: Vec<Line> = self.log_lines[start..]
+        let items: Vec<ListItem> = self
+            .apps
             .iter()
-            .map(|l| Line::from(truncate(l, log_inner_w)))
-            .collect();
-        let log = Paragraph::new(log_lines)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL).title("Output"));
-        frame.render_widget(log, chunks[3]);
-
-        // Results list — newest first
-        let res_w = chunks[4].width.saturating_sub(2) as usize;
-        let name_w = (res_w / 2).min(35);
-        let msg_w = res_w.saturating_sub(name_w + 12);
-        let result_items: Vec<ListItem> = self
-            .results
-            .iter()
-            .rev()
-            .map(|(name, status, msg)| {
-                let (sym, color) = match status.as_str() {
-                    "OK" => ("✓", Color::Green),
-                    "SKIP" => ("─", Color::Yellow),
-                    _ => ("✗", Color::Red),
+            .skip(self.scroll_offset)
+            .take(list_inner_h)
+            .map(|app| {
+                let (sym, col) = match &app.status {
+                    AppRunStatus::Waiting => ("·", Color::DarkGray),
+                    AppRunStatus::Running => ("○", Color::Yellow),
+                    AppRunStatus::Ok => ("✓", Color::Green),
+                    AppRunStatus::Skip => ("─", Color::Yellow),
+                    AppRunStatus::Fail => ("✗", Color::Red),
                 };
-                let line = Line::from(vec![
-                    Span::styled(format!("{} ", sym), Style::default().fg(color)),
-                    Span::raw(fit_cell(name, name_w)),
-                    Span::styled(
-                        format!(" {:<8}", status),
-                        Style::default().fg(color),
-                    ),
-                    Span::styled(
-                        truncate(msg, msg_w),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]);
-                ListItem::new(line)
+                let bar_col = match &app.status {
+                    AppRunStatus::Running => Color::Cyan,
+                    AppRunStatus::Ok => Color::Green,
+                    AppRunStatus::Fail => Color::Red,
+                    AppRunStatus::Skip => Color::Yellow,
+                    AppRunStatus::Waiting => Color::DarkGray,
+                };
+                let filled = (app.progress * bar_w as f64) as usize;
+                let bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(bar_w - filled));
+                let pct = format!("{:>3}%", (app.progress * 100.0) as u8);
+                let last = match &app.status {
+                    AppRunStatus::Waiting => "waiting…".to_string(),
+                    AppRunStatus::Ok | AppRunStatus::Skip | AppRunStatus::Fail => {
+                        truncate(&app.message, last_w.max(1))
+                    }
+                    AppRunStatus::Running => truncate(&app.last_line, last_w.max(1)),
+                };
+
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{} ", sym), Style::default().fg(col)),
+                    Span::raw(fit_cell(&app.name, name_w)),
+                    Span::raw(" "),
+                    Span::styled(bar, Style::default().fg(bar_col)),
+                    Span::raw(" "),
+                    Span::styled(pct, Style::default().fg(bar_col)),
+                    Span::raw(" "),
+                    Span::styled(last, Style::default().fg(Color::DarkGray)),
+                ]))
             })
             .collect();
-        let results_title = format!("Results ({}/{})", done_count, self.total);
-        let results_widget = List::new(result_items)
-            .block(Block::default().borders(Borders::ALL).title(results_title));
-        frame.render_widget(results_widget, chunks[4]);
 
-        // Bottom status / controls
-        let bottom_text = if self.done {
-            let ok = self.results.iter().filter(|(_, s, _)| s == "OK").count();
-            let skip = self.results.iter().filter(|(_, s, _)| s == "SKIP").count();
-            let fail = self.results.iter().filter(|(_, s, _)| s == "FAIL").count();
-            format!(
-                "  OK: {}  Skipped: {}  Failed: {}    [Press any key to exit]",
-                ok, skip, fail
-            )
+        let list_title = if self.done {
+            format!("Applications ({} done)", done_count)
         } else {
-            format!(
-                "  Installing {} of {}…  please wait",
-                self.current_idx + 1,
-                self.total
-            )
+            let running = self
+                .apps
+                .iter()
+                .filter(|a| a.status == AppRunStatus::Running)
+                .count();
+            format!("Applications ({} running)", running)
         };
-        let controls = Paragraph::new(bottom_text)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL));
-        frame.render_widget(controls, chunks[5]);
+        frame.render_widget(
+            List::new(items)
+                .block(Block::default().borders(Borders::ALL).title(list_title)),
+            chunks[2],
+        );
+
+        // Status bar
+        let status_text = if self.done {
+            let ok = self.apps.iter().filter(|a| a.status == AppRunStatus::Ok).count();
+            let skip = self.apps.iter().filter(|a| a.status == AppRunStatus::Skip).count();
+            let fail = self.apps.iter().filter(|a| a.status == AppRunStatus::Fail).count();
+            format!("  OK: {}  Skipped: {}  Failed: {}    [any key to exit]", ok, skip, fail)
+        } else {
+            let running = self
+                .apps
+                .iter()
+                .filter(|a| a.status == AppRunStatus::Running)
+                .count();
+            let waiting = self
+                .apps
+                .iter()
+                .filter(|a| a.status == AppRunStatus::Waiting)
+                .count();
+            format!("  Running: {}  Waiting: {}    [↑↓/j/k] scroll", running, waiting)
+        };
+        frame.render_widget(
+            Paragraph::new(status_text)
+                .style(Style::default().fg(Color::DarkGray))
+                .block(Block::default().borders(Borders::ALL)),
+            chunks[3],
+        );
     }
+}
+
+fn estimate_winget_progress(line: &str) -> Option<f64> {
+    if let Some(pct) = extract_pct(line) {
+        return Some((pct / 100.0).clamp(0.0, 0.99));
+    }
+    let lower = line.to_lowercase();
+    if lower.contains("found ") {
+        return Some(0.05);
+    }
+    if lower.contains("downloading") {
+        return Some(0.15);
+    }
+    if lower.contains("verif") {
+        return Some(0.65);
+    }
+    if lower.contains("starting package install") || lower.contains("starting install") {
+        return Some(0.80);
+    }
+    if lower.contains("successfully installed") || lower.contains("successfully uninstalled") {
+        return Some(0.95);
+    }
+    if lower.contains("already installed") {
+        return Some(0.99);
+    }
+    None
+}
+
+fn extract_pct(s: &str) -> Option<f64> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'%' {
+                if let Ok(n) = s[start..i].parse::<f64>() {
+                    if (0.0..=100.0).contains(&n) {
+                        return Some(n);
+                    }
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
 }
 
 fn strip_ansi_cr(s: &str) -> String {
@@ -417,40 +512,53 @@ fn perform_installation(config_path: &str) -> Result<()> {
 
     let content = fs::read_to_string(&abs)?;
     let config: Config = serde_json::from_str(&content)?;
-    let total = config.apps.len();
 
     let (tx, rx) = mpsc::channel::<InstallMsg>();
+    let apps_spawn = config.apps.clone();
+    let tx_coord = tx.clone();
+    drop(tx);
 
     thread::spawn(move || {
-        let winget = WingetService::new();
-        for (idx, app) in config.apps.iter().enumerate() {
-            let _ = tx.send(InstallMsg::AppStart {
-                idx,
-                name: app.name.clone(),
-                id: app.id.clone(),
-            });
+        let handles: Vec<_> = apps_spawn
+            .into_iter()
+            .enumerate()
+            .map(|(idx, app)| {
+                let tx = tx_coord.clone();
+                thread::spawn(move || {
+                    if !app.available_in_winget {
+                        let _ = tx.send(InstallMsg::AppDone {
+                            idx,
+                            status: "SKIP".to_string(),
+                            message: app.note.unwrap_or_default(),
+                        });
+                        return;
+                    }
+                    let _ = tx.send(InstallMsg::AppStart { idx });
+                    let winget = WingetService::new();
+                    let mut cur_prog = 0.0f64;
+                    let result = winget.install_app(&app.id, |line| {
+                        if let Some(p) = estimate_winget_progress(line) {
+                            cur_prog = cur_prog.max(p);
+                        }
+                        let _ = tx.send(InstallMsg::AppProgress {
+                            idx,
+                            progress: cur_prog,
+                            last_line: line.to_string(),
+                        });
+                    });
+                    let _ = tx.send(InstallMsg::AppDone {
+                        idx,
+                        status: if result.success { "OK".to_string() } else { "FAIL".to_string() },
+                        message: result.message,
+                    });
+                })
+            })
+            .collect();
 
-            if !app.available_in_winget {
-                let _ = tx.send(InstallMsg::AppDone {
-                    name: app.name.clone(),
-                    status: "SKIP".to_string(),
-                    message: app.note.clone().unwrap_or_default(),
-                });
-                continue;
-            }
-
-            let tx_line = tx.clone();
-            let result = winget.install_app(&app.id, move |line| {
-                let _ = tx_line.send(InstallMsg::AppLine(line.to_string()));
-            });
-
-            let _ = tx.send(InstallMsg::AppDone {
-                name: app.name.clone(),
-                status: if result.success { "OK".to_string() } else { "FAIL".to_string() },
-                message: result.message,
-            });
+        for h in handles {
+            h.join().ok();
         }
-        let _ = tx.send(InstallMsg::Done);
+        let _ = tx_coord.send(InstallMsg::Done);
     });
 
     enable_raw_mode()?;
@@ -459,13 +567,13 @@ fn perform_installation(config_path: &str) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = InstallerApp::new(total, rx);
+    let mut installer = InstallerApp::new(&config.apps, rx);
 
     loop {
-        app.poll();
-        terminal.draw(|f| app.draw(f))?;
+        installer.poll();
+        terminal.draw(|f| installer.draw(f))?;
 
-        if app.done {
+        if installer.done {
             if event::poll(Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
@@ -474,7 +582,23 @@ fn perform_installation(config_path: &str) -> Result<()> {
                 }
             }
         } else if event::poll(Duration::from_millis(50))? {
-            let _ = event::read();
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            installer.scroll_offset =
+                                installer.scroll_offset.saturating_sub(1);
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            let max = installer.apps.len().saturating_sub(1);
+                            if installer.scroll_offset < max {
+                                installer.scroll_offset += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
     }
 
