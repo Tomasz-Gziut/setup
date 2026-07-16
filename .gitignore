@@ -17,3 +17,6 @@ Thumbs.db
 
 # Test configs (user specific)
 test-config.json
+
+# graphify output
+/graphify-out/
